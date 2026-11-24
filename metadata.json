@@ -1,0 +1,10 @@
+{
+  "name": "Vetiva IT Remote Desk",
+  "description": "Secure enterprise remote desktop support and screen sharing platform for Vetiva Capital Management Limited.",
+  "requestFramePermissions": [
+    "display-capture"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

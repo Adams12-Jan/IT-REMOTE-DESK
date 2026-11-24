@@ -1,0 +1,43 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      SQL_HOST: postgres
+      SQL_DB_NAME: vetiva_remote_desk
+      SQL_USER: vetiva_app
+      SQL_PASSWORD: ${SQL_PASSWORD}
+      TURN_SERVER_URL: turn:coturn:3478
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+      - coturn
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: vetiva_remote_desk
+      POSTGRES_USER: vetiva_app
+      POSTGRES_PASSWORD: ${SQL_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ../database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/turnserver.conf:ro
+
+volumes:
+  pg_data:

@@ -1,0 +1,19 @@
+[package]
+name = "vetiva-remote-desk-agent"
+version = "1.0.0"
+description = "Vetiva Capital Management Limited - Native OS Remote Control Companion Agent"
+authors = ["Vetiva IT Infrastructure"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = ["tray-icon"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+enigo = "0.2"
+scrap = "0.5"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+url = "2.5"

@@ -1,11 +1,34 @@
-<div align="center">
+# Vetiva IT Remote Desk
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Secure, AnyDesk-inspired remote desktop support platform built for **Vetiva Capital Management Limited**.
 
-  <h1>Built with AI Studio</h2>
+## Architecture
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+- **Frontend**: React 19, TypeScript, Vite, Tailwind CSS, Lucide Icons, Sonner
+- **Backend**: Node.js, Express, Socket.IO (real-time WebRTC signaling & presence), PostgreSQL + Drizzle ORM
+- **Real-Time Streaming**: WebRTC (`RTCPeerConnection` + `RTCDataChannel`) with STUN & HMAC-signed short-lived Coturn TURN credentials
+- **Authentication & RBAC**: Firebase Authentication (Google Workspace Sign-In) with PostgreSQL roles (`admin`, `technician`, `employee`)
+- **Native Control Companion**: Rust + Tauri agent in `/desktop-agent` for explicit-consent OS mouse and keyboard forwarding
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## Local Development
 
-</div>
+1. Configure environment secrets (`SQL_HOST`, `SQL_DB_NAME`, `SQL_USER`, `SQL_PASSWORD`, `SQL_ADMIN_USER`, `SQL_ADMIN_PASSWORD`, and optional `TURN_SERVER_URL`, `TURN_SHARED_SECRET`).
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Push Drizzle schema to PostgreSQL:
+   ```bash
+   npx drizzle-kit push --config=src/db/drizzle.config.ts
+   ```
+4. Start the full-stack server on port `3000`:
+   ```bash
+   npm run dev
+   ```
+
+## Production Build & Docker Deployment
+
+```bash
+npm run build
+docker compose -f infrastructure/docker-compose.yml up -d --build
+```
