@@ -1,11 +1,17 @@
-{
-  "projectId": "oval-quanta-t8gvj",
-  "appId": "1:921987736848:web:31a31ca4de3764921b7195",
-  "apiKey": "AIzaSyB4DAlLz5SRsu8-GEP6eBXTyWlmyIh0tJY",
-  "authDomain": "oval-quanta-t8gvj.firebaseapp.com",
-  "storageBucket": "oval-quanta-t8gvj.firebasestorage.app",
-  "messagingSenderId": "921987736848",
-  "measurementId": "",
-  "oAuthClientId": "921987736848-d23aqvongh2flfmc9hf8efjhl540khbe.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
-}
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyCZMC6lDd40FVKHgkHQrvZkichpsT7A-3A",
+  authDomain: "remote-support-72980.firebaseapp.com",
+  projectId: "remote-support-72980",
+  storageBucket: "remote-support-72980.firebasestorage.app",
+  messagingSenderId: "872327049321",
+  appId: "1:872327049321:web:88d2dc6e7f4da79f49b2f8"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
