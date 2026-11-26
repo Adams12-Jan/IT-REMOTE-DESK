@@ -2,13 +2,12 @@ import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import { createApiRouter } from './src/server/routes/api.ts';
 import { initSocketServer } from './src/server/signaling/socket.ts';
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.set('trust proxy', 1);
 
@@ -29,6 +28,7 @@ async function startServer() {
   initSocketServer(httpServer);
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

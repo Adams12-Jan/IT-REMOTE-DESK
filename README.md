@@ -5,7 +5,7 @@ Secure, AnyDesk-inspired remote desktop support platform built for **Vetiva Capi
 ## Architecture
 
 - **Frontend**: React 19, TypeScript, Vite, Tailwind CSS, Lucide Icons, Sonner
-- **Persistence & Security**: Firebase Firestore + Firebase Authentication (Google Workspace Sign-In) with strict `firestore.rules` RBAC (`admin`, `technician`, `employee`)
+- **Persistence & Security**: Server-authoritative SQLite (`node:sqlite`) + Firebase Authentication (Google Workspace Sign-In) with server-verified ID tokens and RBAC (`admin`, `technician`, `employee`)
 - **Backend**: Node.js, Express, Socket.IO (real-time WebRTC signaling, rate-limited join guard, and malware-scanned file transfer API)
 - **Real-Time Streaming**: WebRTC (`RTCPeerConnection` + `RTCDataChannel`) with STUN & HMAC-signed short-lived Coturn TURN credentials
 - **Native Control Companion**: Rust + Tauri agent in `/desktop-agent` for explicit-consent OS mouse and keyboard forwarding

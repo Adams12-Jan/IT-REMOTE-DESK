@@ -16,4 +16,4 @@ COPY --from=builder /app/src ./src
 COPY --from=builder /app/firebase-applet-config.json ./
 COPY --from=builder /app/public ./public
 EXPOSE 3000
-CMD ["npx", "tsx", "server.ts"]
+CMD ["./node_modules/.bin/tsx", "server.ts"]
