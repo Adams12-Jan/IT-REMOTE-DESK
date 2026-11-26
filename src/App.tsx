@@ -1,8 +1,18 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import { ShieldCheck, X } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { RemoteInputEvent, useWebRTCSession } from './hooks/useWebRTCSession';
+import {
+  approveIncomingSession,
+  createRemoteSession,
+  disconnectSession,
+  getSessionByIdApi,
+  joinRemoteSession,
+  rejectIncomingSession,
+  updateSessionPermissions,
+} from './lib/remoteDeskApi';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { AppPage, Header } from './components/Header';
 import { IncomingApprovalDialog } from './components/IncomingApprovalDialog';
 import { Button, Card } from './components/ui/primitives';
@@ -17,13 +27,12 @@ import {
   FileTransferRecord,
   RemoteSession,
   SessionMessage,
-  SessionParticipantSummary,
-  SessionPermissions,
 } from './types/remoteDesk';
 
 function RemoteDeskWorkspace() {
   const {
     profile,
+    device,
     iceServers,
     socket,
     connectionState,
@@ -39,8 +48,6 @@ function RemoteDeskWorkspace() {
   const [activeSession, setActiveSession] = useState<RemoteSession | null>(null);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [incomingRequester, setIncomingRequester] =
-    useState<SessionParticipantSummary | null>(null);
   const [lastRemoteInput, setLastRemoteInput] = useState<RemoteInputEvent | null>(
     null
   );
@@ -49,9 +56,34 @@ function RemoteDeskWorkspace() {
     senderName: string;
   } | null>(null);
 
+  const prevStatusRef = useRef<RemoteSession['status'] | null>(null);
+  const prevEmergencyRef = useRef<string | null | undefined>(null);
+  const activeSessionRef = useRef<RemoteSession | null>(activeSession);
+  const profileRef = useRef(profile);
+
+  useEffect(() => {
+    activeSessionRef.current = activeSession;
+  }, [activeSession]);
+
+  useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
+
   const isHost = Boolean(
-    activeSession && profile && activeSession.hostUserId === profile.id
+    activeSession && profile && activeSession.hostUid === profile.uid
   );
+
+  const handleRemoteClipboard = useCallback(
+    (text: string, senderName: string) => {
+      setLastClipboardReceived({ text, senderName });
+      toast.info(`Clipboard received from ${senderName}`);
+    },
+    []
+  );
+
+  const handleRemoteInputReceived = useCallback((evt: RemoteInputEvent) => {
+    setLastRemoteInput(evt);
+  }, []);
 
   const {
     remoteStream,
@@ -72,13 +104,8 @@ function RemoteDeskWorkspace() {
     localStream,
     permissions: activeSession?.permissions ?? null,
     isActiveSession: activeSession?.status === 'active',
-    onRemoteClipboard: (text, senderName) => {
-      setLastClipboardReceived({ text, senderName });
-      toast.info(`Clipboard received from ${senderName}`);
-    },
-    onRemoteInputReceived: (evt) => {
-      setLastRemoteInput(evt);
-    },
+    onRemoteClipboard: handleRemoteClipboard,
+    onRemoteInputReceived: handleRemoteInputReceived,
   });
 
   const stopLocalCapture = useCallback(() => {
@@ -90,123 +117,104 @@ function RemoteDeskWorkspace() {
     });
   }, []);
 
-  const refreshActiveSession = useCallback(
-    async (sessionId: number) => {
-      const res = await apiFetch<{ session: RemoteSession }>(
-        `/api/sessions/${sessionId}`
-      );
-      setActiveSession(res.session);
-      return res.session;
+  const applySessionUpdate = useCallback(
+    (next: RemoteSession) => {
+      if (!profileRef.current) return;
+      const currentProfile = profileRef.current;
+
+      setActiveSession((prev) => {
+        if (prev && prev.id !== next.id) return prev;
+
+        const prevStatus = prevStatusRef.current;
+        if (prevStatus && prevStatus !== next.status) {
+          if (
+            next.status === 'pending_approval' &&
+            next.hostUid === currentProfile.uid
+          ) {
+            toast.info(
+              `${next.technician?.displayName || 'IT Support'} is requesting to view your desk.`
+            );
+          } else if (
+            next.status === 'active' &&
+            next.technicianUid === currentProfile.uid
+          ) {
+            toast.success('Connection approved by employee.');
+            setCurrentPage('viewer');
+          } else if (
+            prevStatus === 'pending_approval' &&
+            next.status === 'waiting' &&
+            next.technicianUid === null &&
+            prev?.technicianUid === currentProfile.uid
+          ) {
+            toast.error('Connection request was dismissed by the host.');
+            cleanupPeer();
+            setCurrentPage('landing');
+            prevStatusRef.current = null;
+            return null;
+          } else if (next.status === 'ended' || next.status === 'expired') {
+            toast.info(next.endReason || 'Remote session ended.');
+            cleanupPeer();
+            stopLocalCapture();
+            setAccessToken(null);
+            setCurrentPage((cur) =>
+              cur === 'viewer' || cur === 'share' ? 'landing' : cur
+            );
+            prevStatusRef.current = null;
+            return null;
+          }
+        }
+
+        if (
+          next.permissions?.emergencyStoppedAt &&
+          prevEmergencyRef.current !== next.permissions.emergencyStoppedAt
+        ) {
+          if (prevEmergencyRef.current !== undefined) {
+            toast.warning(
+              'Emergency Stop activated: remote control, clipboard, file transfer, and recording disabled.'
+            );
+          }
+        }
+
+        prevStatusRef.current = next.status;
+        prevEmergencyRef.current = next.permissions?.emergencyStoppedAt;
+        return next;
+      });
     },
-    [apiFetch]
+    [cleanupPeer, stopLocalCapture]
   );
 
-  // Real-time Socket.IO session event synchronization
+  // Real-time Socket.IO synchronization for active session, messages, files & control
   useEffect(() => {
     if (!socket || !profile) return;
 
-    const handleIncomingRequest = async (payload: {
-      sessionId: number;
-      requester: SessionParticipantSummary;
-      systemMessage?: SessionMessage;
-    }) => {
-      setIncomingRequester(payload.requester);
-      toast.info(`${payload.requester.displayName} is requesting to view your desk.`);
-      await refreshActiveSession(payload.sessionId).catch(() => {});
-    };
-
-    const handleApproved = (payload: {
-      sessionId: number;
-      session: RemoteSession;
-    }) => {
-      setIncomingRequester(null);
-      setActiveSession(payload.session);
-      if (payload.session.technicianUserId === profile.id) {
-        toast.success('Connection approved by employee.');
-        setCurrentPage('viewer');
+    const handleSessionUpdated = (updated: RemoteSession) => {
+      if (activeSessionRef.current?.id === updated.id) {
+        applySessionUpdate(updated);
       }
     };
 
-    const handleRejected = (payload: { sessionId: number }) => {
-      setIncomingRequester(null);
-      if (
-        activeSession?.id === payload.sessionId &&
-        activeSession.technicianUserId === profile.id
-      ) {
-        toast.error('Connection request was dismissed by the host.');
-        cleanupPeer();
-        setActiveSession(null);
-        setCurrentPage('landing');
-      } else {
-        void refreshActiveSession(payload.sessionId).catch(() => {});
-      }
-    };
-
-    const handleDisconnected = (payload: {
-      sessionId: number;
-      reason?: string;
-    }) => {
-      if (activeSession?.id === payload.sessionId) {
-        toast.info(payload.reason || 'Remote session ended.');
-        cleanupPeer();
-        stopLocalCapture();
-        setIncomingRequester(null);
-        setActiveSession(null);
-        setAccessToken(null);
-        if (currentPage === 'viewer' || currentPage === 'share') {
-          setCurrentPage('landing');
-        }
-      }
-    };
-
-    const handlePermissionsUpdated = (payload: {
-      sessionId: number;
-      permissions: SessionPermissions;
-      emergencyStop?: boolean;
-    }) => {
-      if (payload.emergencyStop) {
-        toast.warning(
-          'Emergency Stop activated: remote control, clipboard, file transfer, and recording disabled.'
-        );
-      }
-      setActiveSession((prev) =>
-        prev && prev.id === payload.sessionId
-          ? { ...prev, permissions: payload.permissions }
-          : prev
-      );
-    };
-
-    const handleMessage = (payload: {
-      sessionId: number;
-      message: SessionMessage;
-    }) => {
+    const handleSessionMessage = (msg: SessionMessage) => {
       setActiveSession((prev) => {
-        if (!prev || prev.id !== payload.sessionId) return prev;
-        // Idempotency guard against duplicate Socket/HTTP delivery
-        if (prev.messages.some((m) => m.id === payload.message.id)) return prev;
-        return { ...prev, messages: [...prev.messages, payload.message] };
+        if (!prev || prev.id !== msg.sessionId) return prev;
+        if (prev.messages.some((m) => m.id === msg.id)) return prev;
+        return { ...prev, messages: [...prev.messages, msg] };
       });
     };
 
-    const handleFileUploaded = (payload: {
-      sessionId: number;
-      file: FileTransferRecord;
-      uploaderName: string;
-    }) => {
-      toast.info(`New file from ${payload.uploaderName}: ${payload.file.originalName}`);
+    const handleSessionFile = (file: FileTransferRecord) => {
       setActiveSession((prev) => {
-        if (!prev || prev.id !== payload.sessionId) return prev;
-        if (prev.files.some((f) => f.id === payload.file.id)) return prev;
-        return { ...prev, files: [payload.file, ...prev.files] };
+        if (!prev || prev.id !== file.sessionId) return prev;
+        if (prev.files.some((f) => f.id === file.id)) return prev;
+        return { ...prev, files: [file, ...prev.files] };
       });
     };
 
     const handleControlRequest = (payload: {
-      sessionId: number;
+      sessionId: string;
       capability: string;
       requesterName: string;
     }) => {
-      if (activeSession?.id === payload.sessionId && isHost) {
+      if (activeSessionRef.current?.id === payload.sessionId && isHost) {
         toast.info(
           `${payload.requesterName} is requesting ${payload.capability} permission.`
         );
@@ -214,11 +222,11 @@ function RemoteDeskWorkspace() {
     };
 
     const handleClipboardSync = (payload: {
-      sessionId: number;
+      sessionId: string;
       text: string;
       senderName: string;
     }) => {
-      if (activeSession?.id === payload.sessionId) {
+      if (activeSessionRef.current?.id === payload.sessionId) {
         setLastClipboardReceived({
           text: payload.text,
           senderName: payload.senderName,
@@ -228,47 +236,29 @@ function RemoteDeskWorkspace() {
     };
 
     const handleRemoteInput = (
-      payload: RemoteInputEvent & { sessionId: number }
+      payload: RemoteInputEvent & { sessionId: string }
     ) => {
-      if (activeSession?.id === payload.sessionId && isHost) {
+      if (activeSessionRef.current?.id === payload.sessionId && isHost) {
         setLastRemoteInput(payload);
       }
     };
 
-    socket.on('session:incoming-request', handleIncomingRequest);
-    socket.on('session:approved', handleApproved);
-    socket.on('session:rejected', handleRejected);
-    socket.on('session:disconnected', handleDisconnected);
-    socket.on('session:permissions-updated', handlePermissionsUpdated);
-    socket.on('session:message', handleMessage);
-    socket.on('session:file-uploaded', handleFileUploaded);
+    socket.on('session:updated', handleSessionUpdated);
+    socket.on('session:message', handleSessionMessage);
+    socket.on('session:file', handleSessionFile);
     socket.on('session:control-request', handleControlRequest);
     socket.on('session:clipboard-sync', handleClipboardSync);
     socket.on('session:remote-input', handleRemoteInput);
 
     return () => {
-      socket.off('session:incoming-request', handleIncomingRequest);
-      socket.off('session:approved', handleApproved);
-      socket.off('session:rejected', handleRejected);
-      socket.off('session:disconnected', handleDisconnected);
-      socket.off('session:permissions-updated', handlePermissionsUpdated);
-      socket.off('session:message', handleMessage);
-      socket.off('session:file-uploaded', handleFileUploaded);
+      socket.off('session:updated', handleSessionUpdated);
+      socket.off('session:message', handleSessionMessage);
+      socket.off('session:file', handleSessionFile);
       socket.off('session:control-request', handleControlRequest);
       socket.off('session:clipboard-sync', handleClipboardSync);
       socket.off('session:remote-input', handleRemoteInput);
     };
-  }, [
-    activeSession?.id,
-    activeSession?.technicianUserId,
-    cleanupPeer,
-    currentPage,
-    isHost,
-    profile,
-    refreshActiveSession,
-    socket,
-    stopLocalCapture,
-  ]);
+  }, [applySessionUpdate, isHost, profile, socket]);
 
   const handleRequireAuth = async () => {
     setShowSignInModal(true);
@@ -288,7 +278,46 @@ function RemoteDeskWorkspace() {
     }
   };
 
+  const handleStopSharing = useCallback(
+    async (reason?: string) => {
+      const sid = activeSessionRef.current?.id;
+      const wasHost = Boolean(
+        activeSessionRef.current &&
+          profileRef.current &&
+          activeSessionRef.current.hostUid === profileRef.current.uid
+      );
+      const currentProfile = profileRef.current;
+      cleanupPeer();
+      stopLocalCapture();
+      activeSessionRef.current = null;
+      setActiveSession(null);
+      setAccessToken(null);
+      setCurrentPage('landing');
+
+      if (sid && currentProfile) {
+        const finalReason =
+          typeof reason === 'string' && reason.trim()
+            ? reason
+            : wasHost
+              ? 'Host stopped screen sharing'
+              : 'IT Support technician disconnected';
+        await disconnectSession(apiFetch, sid, finalReason).catch(() => {});
+        toast.success(
+          wasHost
+            ? 'Screen sharing stopped and session closed.'
+            : 'Disconnected from remote support session.'
+        );
+      }
+    },
+    [apiFetch, cleanupPeer, stopLocalCapture]
+  );
+
   const handleStartSharing = async (issueSummary: string) => {
+    if (!profile || !device) {
+      setShowSignInModal(true);
+      return;
+    }
+
     if (!navigator.mediaDevices?.getDisplayMedia) {
       toast.error(
         'Screen sharing requires a modern desktop browser supporting display capture.'
@@ -314,13 +343,13 @@ function RemoteDeskWorkspace() {
     }
 
     try {
-      const res = await apiFetch<{
-        session: RemoteSession;
-        accessToken: string;
-      }>('/api/sessions/create', {
-        method: 'POST',
-        body: JSON.stringify({ issueSummary }),
-      });
+      const { session, accessToken: token } = await createRemoteSession(
+        apiFetch,
+        {
+          deviceId: device.id,
+          issueSummary,
+        }
+      );
 
       const videoTrack = capturedStream.getVideoTracks()[0];
       if (videoTrack) {
@@ -329,10 +358,14 @@ function RemoteDeskWorkspace() {
         };
       }
 
+      prevStatusRef.current = session.status;
+      activeSessionRef.current = session;
       setLocalStream(capturedStream);
-      setActiveSession(res.session);
-      setAccessToken(res.accessToken);
-      toast.success('Screen sharing session created. Share the ID and code with IT Support.');
+      setActiveSession(session);
+      setAccessToken(token);
+      toast.success(
+        'Screen sharing session created. Share the ID and code with IT Support.'
+      );
     } catch (err) {
       capturedStream.getTracks().forEach((t) => t.stop());
       toast.error(
@@ -348,39 +381,38 @@ function RemoteDeskWorkspace() {
         audio: false,
       });
       const prevStream = localStream;
+      if (prevStream) {
+        prevStream.getTracks().forEach((t) => {
+          t.onended = null;
+          t.stop();
+        });
+      }
+      const nextTrack = nextStream.getVideoTracks()[0];
+      if (nextTrack) {
+        nextTrack.onended = () => {
+          void handleStopSharing();
+        };
+      }
       setLocalStream(nextStream);
       await replaceVideoTrack(nextStream);
-      prevStream?.getTracks().forEach((t) => t.stop());
       toast.success('Switched shared screen.');
     } catch {
       toast.info('Screen switch cancelled.');
     }
   };
 
-  const handleStopSharing = async () => {
-    const sid = activeSession?.id;
-    cleanupPeer();
-    stopLocalCapture();
-    setIncomingRequester(null);
-    setActiveSession(null);
-    setAccessToken(null);
-    setCurrentPage('landing');
-
-    if (sid) {
-      await apiFetch(`/api/sessions/${sid}/disconnect`, {
-        method: 'POST',
-        body: JSON.stringify({ reason: 'Host stopped screen sharing' }),
-      }).catch(() => {});
-      toast.success('Screen sharing stopped and session closed.');
-    }
-  };
-
   const handleJoinSession = async (sessionCode: string, token: string) => {
-    const res = await apiFetch<{ session: RemoteSession }>('/api/sessions/join', {
-      method: 'POST',
-      body: JSON.stringify({ sessionCode, accessToken: token }),
+    if (!profile) {
+      setShowSignInModal(true);
+      return;
+    }
+    const session = await joinRemoteSession(apiFetch, {
+      sessionCode,
+      accessToken: token,
     });
-    setActiveSession(res.session);
+    prevStatusRef.current = session.status;
+    activeSessionRef.current = session;
+    setActiveSession(session);
     setAccessToken(null);
     setCurrentPage('viewer');
     toast.success('Connection request sent. Waiting for employee approval.');
@@ -394,28 +426,19 @@ function RemoteDeskWorkspace() {
     canTransferFiles: boolean;
     canRecordSession: boolean;
   }) => {
-    if (!activeSession) return;
-    const res = await apiFetch<{ session: RemoteSession }>(
-      `/api/sessions/${activeSession.id}/approve`,
-      {
-        method: 'POST',
-        body: JSON.stringify(perms),
-      }
-    );
-    setIncomingRequester(null);
-    setActiveSession(res.session);
+    if (!activeSession || !profile) return;
+    const updated = await approveIncomingSession(apiFetch, activeSession.id, perms);
+    setActiveSession(updated);
+    prevStatusRef.current = updated.status;
     setCurrentPage('share');
     toast.success('Support connection approved.');
   };
 
   const handleRejectIncoming = async () => {
-    if (!activeSession) return;
-    const res = await apiFetch<{ session: RemoteSession }>(
-      `/api/sessions/${activeSession.id}/reject`,
-      { method: 'POST' }
-    );
-    setIncomingRequester(null);
-    setActiveSession(res.session);
+    if (!activeSession || !profile) return;
+    const updated = await rejectIncomingSession(apiFetch, activeSession.id);
+    setActiveSession(updated);
+    prevStatusRef.current = updated.status;
     toast.info('Incoming connection dismissed.');
   };
 
@@ -427,24 +450,24 @@ function RemoteDeskWorkspace() {
     canRecordSession?: boolean;
     emergencyStop?: boolean;
   }) => {
-    if (!activeSession) return;
-    const res = await apiFetch<{ permissions: SessionPermissions }>(
-      `/api/sessions/${activeSession.id}/permissions`,
-      {
-        method: 'POST',
-        body: JSON.stringify(updates),
-      }
+    if (!activeSession || !profile) return;
+    const { session: updated } = await updateSessionPermissions(
+      apiFetch,
+      activeSession.id,
+      updates
     );
-    setActiveSession((prev) =>
-      prev ? { ...prev, permissions: res.permissions } : prev
-    );
+    setActiveSession(updated);
   };
 
   const handleOpenSessionFromDashboard = async (
-    sessionId: number,
+    sessionId: string,
     mode: 'host' | 'viewer'
   ) => {
-    await refreshActiveSession(sessionId);
+    if (!profile) return;
+    const session = await getSessionByIdApi(apiFetch, sessionId);
+    prevStatusRef.current = session.status;
+    activeSessionRef.current = session;
+    setActiveSession(session);
     setCurrentPage(mode === 'host' ? 'share' : 'viewer');
   };
 
@@ -480,9 +503,27 @@ function RemoteDeskWorkspace() {
           setCurrentPage('landing');
         }}
         hasActiveSession={Boolean(activeSession)}
+        isHostSession={isHost}
       />
 
-      {/* Active Page Router */}
+      {authError && !profile && !showSignInModal && (
+        <div
+          role="alert"
+          className="max-w-6xl w-full mx-auto px-4 sm:px-6 pt-4"
+        >
+          <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-xs text-[#D32027] flex items-center justify-between gap-3">
+            <span>{authError}</span>
+            <button
+              type="button"
+              onClick={() => setShowSignInModal(true)}
+              className="font-semibold underline shrink-0 cursor-pointer"
+            >
+              Sign In
+            </button>
+          </div>
+        </div>
+      )}
+
       {currentPage === 'landing' && (
         <LandingPage
           activeSession={activeSession}
@@ -553,19 +594,17 @@ function RemoteDeskWorkspace() {
         <SettingsPage />
       )}
 
-      {/* Incoming Connection Approval Dialog (Screenshot 2) */}
       {isHost &&
         activeSession &&
         activeSession.status === 'pending_approval' && (
           <IncomingApprovalDialog
             session={activeSession}
-            requester={incomingRequester || activeSession.technician}
+            requester={activeSession.technician}
             onApprove={handleApproveIncoming}
             onReject={handleRejectIncoming}
           />
         )}
 
-      {/* Corporate Google Sign-In Modal */}
       {showSignInModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
@@ -594,7 +633,7 @@ function RemoteDeskWorkspace() {
                   Vetiva Corporate Sign In
                 </h2>
                 <p className="text-xs text-neutral-500">
-                  IT Remote Desk Authentication
+                  Virtual Remote Desk Authentication
                 </p>
               </div>
             </div>
@@ -628,8 +667,10 @@ function RemoteDeskWorkspace() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <RemoteDeskWorkspace />
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <RemoteDeskWorkspace />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }

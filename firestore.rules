@@ -1,0 +1,814 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------------------------
+    // Pillar 0: Global Safety Net (Default Deny)
+    // -------------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Pillar 3: Global Primitives & Identity Helpers
+    // -------------------------------------------------------------------------
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email is string
+        && request.auth.token.email.size() <= 200;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedEmail() && request.auth.token.email.lower() == 'gideonline18@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerifiedEmail()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleSlug == 'admin'
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isActive == true
+      );
+    }
+
+    function isSessionParticipant(sessionId) {
+      let sess = get(/databases/$(database)/documents/sessions/$(sessionId)).data;
+      return sess.hostUid == request.auth.uid || sess.technicianUid == request.auth.uid;
+    }
+
+    // -------------------------------------------------------------------------
+    // Pillar 2: Validation Blueprints (Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+    function isValidParticipantSummary(summary) {
+      return summary is map
+        && summary.keys().hasAll(['uid', 'displayName', 'email', 'department', 'roleSlug'])
+        && summary.keys().hasOnly(['uid', 'displayName', 'email', 'department', 'roleSlug'])
+        && isValidId(summary.uid)
+        && summary.displayName is string && summary.displayName.size() >= 1 && summary.displayName.size() <= 100
+        && summary.email is string && summary.email.size() >= 3 && summary.email.size() <= 200
+        && summary.department is string && summary.department.size() >= 1 && summary.department.size() <= 100
+        && summary.roleSlug in ['admin', 'technician', 'employee'];
+    }
+
+    function isValidSessionPermissionsMap(perms) {
+      return perms is map
+        && perms.keys().hasAll([
+          'profileName',
+          'canViewScreen',
+          'canControlInput',
+          'canShareClipboard',
+          'canTransferFiles',
+          'canRecordSession',
+          'unattendedAccess',
+          'emergencyStoppedAt',
+          'updatedByUid',
+          'updatedAt'
+        ])
+        && perms.keys().hasOnly([
+          'profileName',
+          'canViewScreen',
+          'canControlInput',
+          'canShareClipboard',
+          'canTransferFiles',
+          'canRecordSession',
+          'unattendedAccess',
+          'emergencyStoppedAt',
+          'updatedByUid',
+          'updatedAt'
+        ])
+        && perms.profileName in ['Default', 'View Only', 'Full Support', 'Custom']
+        && perms.canViewScreen is bool
+        && perms.canControlInput is bool
+        && perms.canShareClipboard is bool
+        && perms.canTransferFiles is bool
+        && perms.canRecordSession is bool
+        && perms.unattendedAccess == false
+        && (perms.emergencyStoppedAt == null || perms.emergencyStoppedAt is timestamp)
+        && isValidId(perms.updatedByUid)
+        && perms.updatedAt is timestamp;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+          'uid',
+          'email',
+          'displayName',
+          'department',
+          'roleSlug',
+          'isActive',
+          'isOnline',
+          'lastSeenAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'email',
+          'displayName',
+          'department',
+          'roleSlug',
+          'isActive',
+          'isOnline',
+          'inviteId',
+          'lastSeenAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.department is string && data.department.size() >= 1 && data.department.size() <= 100
+        && data.roleSlug in ['admin', 'technician', 'employee']
+        && data.isActive is bool
+        && data.isOnline is bool
+        && (!('inviteId' in data) || isValidId(data.inviteId))
+        && data.lastSeenAt is timestamp
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserInvite(data) {
+      return data.keys().hasAll([
+          'email',
+          'displayName',
+          'department',
+          'roleSlug',
+          'claimed',
+          'createdByUid',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'email',
+          'displayName',
+          'department',
+          'roleSlug',
+          'claimed',
+          'createdByUid',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.department is string && data.department.size() >= 1 && data.department.size() <= 100
+        && data.roleSlug in ['admin', 'technician', 'employee']
+        && data.claimed is bool
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTechnicianPresence(data) {
+      return data.keys().hasAll([
+          'uid',
+          'displayName',
+          'department',
+          'roleSlug',
+          'isActive',
+          'isOnline',
+          'lastSeenAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'department',
+          'roleSlug',
+          'isActive',
+          'isOnline',
+          'lastSeenAt',
+          'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.department is string && data.department.size() >= 1 && data.department.size() <= 100
+        && data.roleSlug in ['admin', 'technician']
+        && data.isActive is bool
+        && data.isOnline is bool
+        && data.lastSeenAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidDeviceRecord(data) {
+      return data.keys().hasAll([
+          'deviceCode',
+          'ownerUid',
+          'hostname',
+          'osPlatform',
+          'agentVersion',
+          'nativeAgentLinked',
+          'lastActiveAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'deviceCode',
+          'ownerUid',
+          'hostname',
+          'osPlatform',
+          'agentVersion',
+          'nativeAgentLinked',
+          'lastActiveAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.deviceCode is string && data.deviceCode.size() >= 9 && data.deviceCode.size() <= 12 && data.deviceCode.matches('^\\d{9,12}$')
+        && isValidId(data.ownerUid)
+        && data.hostname is string && data.hostname.size() >= 1 && data.hostname.size() <= 100
+        && data.osPlatform is string && data.osPlatform.size() >= 1 && data.osPlatform.size() <= 80
+        && data.agentVersion is string && data.agentVersion.size() >= 1 && data.agentVersion.size() <= 60
+        && data.nativeAgentLinked is bool
+        && data.lastActiveAt is timestamp
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAppSettings(data) {
+      return data.keys().hasAll([
+          'settingKey',
+          'sessionExpiryMinutes',
+          'maxFailedAttempts',
+          'maxFileSizeMb',
+          'requireExplicitControlConsent',
+          'allowSessionRecording',
+          'enforceVetivaDomainOnly',
+          'allowedFileExtensions',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'settingKey',
+          'sessionExpiryMinutes',
+          'maxFailedAttempts',
+          'maxFileSizeMb',
+          'requireExplicitControlConsent',
+          'allowSessionRecording',
+          'enforceVetivaDomainOnly',
+          'allowedFileExtensions',
+          'updatedByUid',
+          'updatedAt'
+        ])
+        && data.settingKey == 'default'
+        && data.sessionExpiryMinutes is int && data.sessionExpiryMinutes >= 5 && data.sessionExpiryMinutes <= 480
+        && data.maxFailedAttempts is int && data.maxFailedAttempts >= 2 && data.maxFailedAttempts <= 20
+        && data.maxFileSizeMb is int && data.maxFileSizeMb >= 1 && data.maxFileSizeMb <= 50
+        && data.requireExplicitControlConsent is bool
+        && data.allowSessionRecording is bool
+        && data.enforceVetivaDomainOnly is bool
+        && data.allowedFileExtensions is list
+        && data.allowedFileExtensions.size() >= 1
+        && data.allowedFileExtensions.size() <= 25
+        && data.allowedFileExtensions[0] is string
+        && data.allowedFileExtensions[0].size() >= 2
+        && data.allowedFileExtensions[0].size() <= 12
+        && (!('updatedByUid' in data) || data.updatedByUid == null || isValidId(data.updatedByUid))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRemoteSession(data) {
+      return data.keys().hasAll([
+          'sessionCode',
+          'hostUid',
+          'hostSummary',
+          'technicianUid',
+          'technicianSummary',
+          'deviceId',
+          'status',
+          'issueSummary',
+          'connectionQuality',
+          'latencyMs',
+          'permissions',
+          'startedAt',
+          'endedAt',
+          'expiresAt',
+          'endedByUid',
+          'endReason',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'sessionCode',
+          'hostUid',
+          'hostSummary',
+          'technicianUid',
+          'technicianSummary',
+          'deviceId',
+          'status',
+          'issueSummary',
+          'tokenHash',
+          'connectionQuality',
+          'latencyMs',
+          'permissions',
+          'startedAt',
+          'endedAt',
+          'expiresAt',
+          'endedByUid',
+          'endReason',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.sessionCode is string && data.sessionCode.size() >= 9 && data.sessionCode.size() <= 12 && data.sessionCode.matches('^\\d{9,12}$')
+        && isValidId(data.hostUid)
+        && isValidParticipantSummary(data.hostSummary)
+        && (data.technicianUid == null || isValidId(data.technicianUid))
+        && (data.technicianSummary == null || isValidParticipantSummary(data.technicianSummary))
+        && isValidId(data.deviceId)
+        && data.status in ['waiting', 'pending_approval', 'active', 'rejected', 'ended', 'expired']
+        && data.issueSummary is string && data.issueSummary.size() >= 1 && data.issueSummary.size() <= 160
+        && (!('tokenHash' in data) || data.tokenHash == null || isValidId(data.tokenHash))
+        && data.connectionQuality in ['excellent', 'good', 'fair', 'poor']
+        && data.latencyMs is int && data.latencyMs >= 0 && data.latencyMs <= 9999
+        && isValidSessionPermissionsMap(data.permissions)
+        && (data.startedAt == null || data.startedAt is timestamp)
+        && (data.endedAt == null || data.endedAt is timestamp)
+        && data.expiresAt is timestamp
+        && (data.endedByUid == null || isValidId(data.endedByUid))
+        && (data.endReason == null || (data.endReason is string && data.endReason.size() <= 160))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAccessTokenDoc(data) {
+      return data.keys().hasAll(['hostUid', 'createdAt'])
+        && data.keys().hasOnly(['hostUid', 'createdAt'])
+        && isValidId(data.hostUid)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSessionMessage(data) {
+      return data.keys().hasAll([
+          'sessionId',
+          'hostUid',
+          'technicianUid',
+          'senderUid',
+          'senderName',
+          'messageType',
+          'body',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'sessionId',
+          'hostUid',
+          'technicianUid',
+          'senderUid',
+          'senderName',
+          'messageType',
+          'body',
+          'createdAt'
+        ])
+        && isValidId(data.sessionId)
+        && isValidId(data.hostUid)
+        && (data.technicianUid == null || isValidId(data.technicianUid))
+        && (data.senderUid == null || isValidId(data.senderUid))
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 100
+        && data.messageType in ['text', 'system']
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 2000
+        && data.createdAt is timestamp;
+    }
+
+    function isValidFileTransfer(data) {
+      return data.keys().hasAll([
+          'sessionId',
+          'hostUid',
+          'technicianUid',
+          'uploaderUid',
+          'originalName',
+          'storedName',
+          'mimeType',
+          'sizeBytes',
+          'sha256Hash',
+          'scanStatus',
+          'downloadCount',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'sessionId',
+          'hostUid',
+          'technicianUid',
+          'uploaderUid',
+          'originalName',
+          'storedName',
+          'mimeType',
+          'sizeBytes',
+          'sha256Hash',
+          'scanStatus',
+          'downloadCount',
+          'createdAt'
+        ])
+        && isValidId(data.sessionId)
+        && isValidId(data.hostUid)
+        && (data.technicianUid == null || isValidId(data.technicianUid))
+        && isValidId(data.uploaderUid)
+        && data.originalName is string && data.originalName.size() >= 1 && data.originalName.size() <= 160
+        && data.storedName is string && data.storedName.size() >= 1 && data.storedName.size() <= 160
+        && data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 120
+        && data.sizeBytes is int && data.sizeBytes >= 0 && data.sizeBytes <= 52428800
+        && data.sha256Hash is string && data.sha256Hash.size() == 64
+        && data.scanStatus in ['clean', 'blocked']
+        && data.downloadCount is int && data.downloadCount >= 0
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll([
+          'actorUid',
+          'actorEmail',
+          'sessionId',
+          'action',
+          'severity',
+          'metadata',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'actorUid',
+          'actorEmail',
+          'sessionId',
+          'action',
+          'severity',
+          'metadata',
+          'createdAt'
+        ])
+        && isValidId(data.actorUid)
+        && (data.actorEmail == null || (data.actorEmail is string && data.actorEmail.size() <= 200))
+        && (data.sessionId == null || isValidId(data.sessionId))
+        && data.action is string && data.action.size() >= 1 && data.action.size() <= 100
+        && data.severity in ['info', 'warning', 'critical']
+        && data.metadata is map
+        && data.createdAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Rules
+    // -------------------------------------------------------------------------
+
+    // 1. Users (PII Protected: Owner or Admin only)
+    match /users/{userId} {
+      allow get: if isVerifiedEmail() && isValidId(userId) && (userId == request.auth.uid || isAdmin());
+      allow list: if isBootstrappedAdmin() || (isVerifiedEmail() && resource.data.uid == request.auth.uid);
+
+      allow create: if isVerifiedEmail()
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && userId == request.auth.uid
+        && incoming().uid == request.auth.uid
+        && incoming().email.lower() == request.auth.token.email.lower()
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (isBootstrappedAdmin() && incoming().roleSlug == 'admin' && incoming().isActive == true)
+          || (!('inviteId' in incoming()) && incoming().roleSlug == 'employee' && incoming().isActive == true)
+          || (
+            'inviteId' in incoming()
+            && exists(/databases/$(database)/documents/invites/$(incoming().inviteId))
+            && get(/databases/$(database)/documents/invites/$(incoming().inviteId)).data.email.lower() == request.auth.token.email.lower()
+            && get(/databases/$(database)/documents/invites/$(incoming().inviteId)).data.claimed == false
+            && incoming().roleSlug == get(/databases/$(database)/documents/invites/$(incoming().inviteId)).data.roleSlug
+            && incoming().isActive == true
+          )
+        );
+
+      allow update: if isVerifiedEmail()
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['roleSlug', 'department', 'displayName', 'isActive', 'isOnline', 'lastSeenAt', 'updatedAt'])
+          )
+          || (
+            userId == request.auth.uid
+            && incoming().roleSlug == existing().roleSlug
+            && incoming().isActive == existing().isActive
+            && incoming().email.lower() == request.auth.token.email.lower()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['isOnline', 'lastSeenAt', 'displayName', 'updatedAt'])
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // 2. User Invites
+    match /invites/{inviteId} {
+      allow get: if isVerifiedEmail() && isValidId(inviteId) && (isAdmin() || existing().email.lower() == request.auth.token.email.lower());
+      allow list: if isBootstrappedAdmin() || (isVerifiedEmail() && resource.data.email == request.auth.token.email.lower());
+
+      allow create: if isAdmin()
+        && isValidId(inviteId)
+        && isValidUserInvite(incoming())
+        && incoming().createdByUid == request.auth.uid
+        && incoming().claimed == false
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedEmail()
+        && isValidId(inviteId)
+        && isValidUserInvite(incoming())
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().email == existing().email
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['roleSlug', 'department', 'displayName', 'claimed', 'updatedAt'])
+          )
+          || (
+            existing().claimed == false
+            && incoming().claimed == true
+            && existing().email.lower() == request.auth.token.email.lower()
+            && incoming().roleSlug == existing().roleSlug
+            && incoming().diff(existing()).affectedKeys().hasOnly(['claimed', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(inviteId);
+    }
+
+    // 3. Technician Presence (Non-PII Dashboard Cards)
+    match /technicians/{userId} {
+      allow get: if isVerifiedEmail() && isValidId(userId);
+      allow list: if isBootstrappedAdmin() || (isVerifiedEmail() && resource.data.isActive == true);
+
+      allow create, update: if isVerifiedEmail()
+        && isValidId(userId)
+        && isValidTechnicianPresence(incoming())
+        && incoming().uid == userId
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            userId == request.auth.uid
+            && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleSlug in ['admin', 'technician']
+            && incoming().roleSlug == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleSlug
+            && incoming().isActive == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isActive
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    // 4. Registered Devices
+    match /devices/{deviceId} {
+      allow get: if isVerifiedEmail() && isValidId(deviceId) && (deviceId == (request.auth.uid + '_primary') || (resource != null && existing().ownerUid == request.auth.uid) || isAdmin());
+      allow list: if false;
+
+      allow create: if isVerifiedEmail()
+        && isValidId(deviceId)
+        && isValidDeviceRecord(incoming())
+        && deviceId == (request.auth.uid + '_primary')
+        && incoming().ownerUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedEmail()
+        && isValidId(deviceId)
+        && isValidDeviceRecord(incoming())
+        && existing().ownerUid == request.auth.uid
+        && incoming().ownerUid == existing().ownerUid
+        && incoming().deviceCode == existing().deviceCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['lastActiveAt', 'osPlatform', 'agentVersion', 'nativeAgentLinked', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    // 5. Global Security Policy Settings
+    match /appSettings/{settingKey} {
+      allow get: if isVerifiedEmail() && isValidId(settingKey) && settingKey == 'default';
+      allow list: if false;
+
+      allow create: if isAdmin()
+        && isValidId(settingKey)
+        && settingKey == 'default'
+        && isValidAppSettings(incoming())
+        && incoming().updatedAt == request.time;
+
+      allow update: if isAdmin()
+        && isValidId(settingKey)
+        && settingKey == 'default'
+        && isValidAppSettings(incoming())
+        && incoming().updatedAt == request.time;
+
+      allow delete: if false;
+    }
+
+    // 6. Remote Support Sessions
+    match /sessions/{sessionId} {
+      allow get: if isVerifiedEmail()
+        && isValidId(sessionId)
+        && (existing().hostUid == request.auth.uid || existing().technicianUid == request.auth.uid || isAdmin());
+
+      allow list: if isBootstrappedAdmin()
+        || (isVerifiedEmail() && (resource.data.hostUid == request.auth.uid || resource.data.technicianUid == request.auth.uid));
+
+      allow create: if isVerifiedEmail()
+        && isValidId(sessionId)
+        && sessionId.matches('^\\d{9,12}$')
+        && isValidRemoteSession(incoming())
+        && incoming().hostUid == request.auth.uid
+        && incoming().sessionCode == sessionId
+        && incoming().status == 'waiting'
+        && incoming().technicianUid == null
+        && incoming().technicianSummary == null
+        && incoming().permissions.canControlInput == false
+        && incoming().permissions.canShareClipboard == false
+        && incoming().permissions.canTransferFiles == false
+        && incoming().permissions.canRecordSession == false
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedEmail()
+        && isValidId(sessionId)
+        && isValidRemoteSession(incoming())
+        && incoming().sessionCode == existing().sessionCode
+        && incoming().hostUid == existing().hostUid
+        && incoming().deviceId == existing().deviceId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'endedAt', 'endedByUid', 'endReason', 'permissions', 'updatedAt'])
+          )
+          || (
+            // Action: Technician Join Request (requires valid single-use tokenHash in accessTokens subcollection)
+            existing().status in ['waiting', 'pending_approval', 'active']
+            && request.auth.uid != existing().hostUid
+            && incoming().technicianUid == request.auth.uid
+            && incoming().status == (existing().status == 'active' ? 'active' : 'pending_approval')
+            && 'tokenHash' in incoming()
+            && incoming().tokenHash is string
+            && exists(/databases/$(database)/documents/sessions/$(sessionId)/accessTokens/$(incoming().tokenHash))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['technicianUid', 'technicianSummary', 'status', 'tokenHash', 'updatedAt'])
+          )
+          || (
+            // Action: Host Approves Connection
+            existing().hostUid == request.auth.uid
+            && existing().status in ['waiting', 'pending_approval', 'active']
+            && incoming().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'permissions', 'startedAt', 'updatedAt'])
+          )
+          || (
+            // Action: Host Dismisses Request
+            existing().hostUid == request.auth.uid
+            && existing().status == 'pending_approval'
+            && incoming().status == 'waiting'
+            && incoming().technicianUid == null
+            && incoming().technicianSummary == null
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'technicianUid', 'technicianSummary', 'updatedAt'])
+          )
+          || (
+            // Action: Host Updates Granular Permissions
+            existing().hostUid == request.auth.uid
+            && existing().status in ['waiting', 'pending_approval', 'active']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['permissions', 'updatedAt'])
+          )
+          || (
+            // Action: Emergency Stop (Host or Assigned Technician)
+            (existing().hostUid == request.auth.uid || existing().technicianUid == request.auth.uid)
+            && existing().status in ['pending_approval', 'active']
+            && incoming().permissions.canControlInput == false
+            && incoming().permissions.canShareClipboard == false
+            && incoming().permissions.canTransferFiles == false
+            && incoming().permissions.canRecordSession == false
+            && incoming().diff(existing()).affectedKeys().hasOnly(['permissions', 'updatedAt'])
+          )
+          || (
+            // Action: Live Latency & Connection Quality Telemetry
+            (existing().hostUid == request.auth.uid || existing().technicianUid == request.auth.uid)
+            && existing().status == 'active'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['latencyMs', 'connectionQuality', 'updatedAt'])
+          )
+          || (
+            // Action: Disconnect or Expire Session
+            (existing().hostUid == request.auth.uid || existing().technicianUid == request.auth.uid)
+            && existing().status in ['waiting', 'pending_approval', 'active']
+            && incoming().status in ['ended', 'expired']
+            && incoming().permissions.canControlInput == false
+            && incoming().permissions.canShareClipboard == false
+            && incoming().permissions.canTransferFiles == false
+            && incoming().permissions.canRecordSession == false
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'endedAt', 'endedByUid', 'endReason', 'permissions', 'updatedAt'])
+          )
+        );
+
+      allow delete: if false;
+
+      // 6a. Single-use access token hash verifier (Write-once by host, never listable)
+      match /accessTokens/{tokenHash} {
+        allow get: if isVerifiedEmail()
+          && isValidId(sessionId)
+          && isValidId(tokenHash)
+          && get(/databases/$(database)/documents/sessions/$(sessionId)).data.hostUid == request.auth.uid;
+        allow list: if false;
+
+        allow create: if isVerifiedEmail()
+          && isValidId(sessionId)
+          && isValidId(tokenHash)
+          && isValidAccessTokenDoc(incoming())
+          && incoming().hostUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.hostUid == request.auth.uid;
+
+        allow update, delete: if false;
+      }
+
+      // 6b. Session Chat & Security Event Messages (Master Gate)
+      match /messages/{messageId} {
+        allow get: if isVerifiedEmail()
+          && isValidId(sessionId)
+          && isValidId(messageId)
+          && (isSessionParticipant(sessionId) || isAdmin());
+
+        allow list: if isBootstrappedAdmin()
+          || (isVerifiedEmail() && (resource.data.hostUid == request.auth.uid || resource.data.technicianUid == request.auth.uid));
+
+        allow create: if isVerifiedEmail()
+          && isValidId(sessionId)
+          && isValidId(messageId)
+          && isValidSessionMessage(incoming())
+          && incoming().sessionId == sessionId
+          && incoming().createdAt == request.time
+          && isSessionParticipant(sessionId)
+          && incoming().hostUid == get(/databases/$(database)/documents/sessions/$(sessionId)).data.hostUid
+          && incoming().technicianUid == get(/databases/$(database)/documents/sessions/$(sessionId)).data.technicianUid
+          && (incoming().senderUid == request.auth.uid || incoming().senderUid == null);
+
+        allow update, delete: if false;
+      }
+
+      // 6c. Malware-Scanned File Transfer Records (Master Gate + Consent Check)
+      match /files/{fileId} {
+        allow get: if isVerifiedEmail()
+          && isValidId(sessionId)
+          && isValidId(fileId)
+          && (isSessionParticipant(sessionId) || isAdmin());
+
+        allow list: if isBootstrappedAdmin()
+          || (isVerifiedEmail() && (resource.data.hostUid == request.auth.uid || resource.data.technicianUid == request.auth.uid));
+
+        allow create: if isVerifiedEmail()
+          && isValidId(sessionId)
+          && isValidId(fileId)
+          && isValidFileTransfer(incoming())
+          && incoming().sessionId == sessionId
+          && incoming().uploaderUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && isSessionParticipant(sessionId)
+          && get(/databases/$(database)/documents/sessions/$(sessionId)).data.hostUid == incoming().hostUid
+          && get(/databases/$(database)/documents/sessions/$(sessionId)).data.technicianUid == incoming().technicianUid
+          && get(/databases/$(database)/documents/sessions/$(sessionId)).data.permissions.canTransferFiles == true;
+
+        allow update: if isVerifiedEmail()
+          && isValidId(sessionId)
+          && isValidId(fileId)
+          && isValidFileTransfer(incoming())
+          && isSessionParticipant(sessionId)
+          && incoming().sessionId == existing().sessionId
+          && incoming().hostUid == existing().hostUid
+          && incoming().uploaderUid == existing().uploaderUid
+          && incoming().storedName == existing().storedName
+          && incoming().sha256Hash == existing().sha256Hash
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['downloadCount']);
+
+        allow delete: if false;
+      }
+    }
+
+    // 7. Immutable Security Audit Logs
+    match /auditLogs/{logId} {
+      allow get: if isAdmin() && isValidId(logId);
+      allow list: if isBootstrappedAdmin() || (isVerifiedEmail() && resource.data.actorUid == request.auth.uid);
+
+      allow create: if isVerifiedEmail()
+        && isValidId(logId)
+        && isValidAuditLog(incoming())
+        && incoming().actorUid == request.auth.uid
+        && incoming().createdAt == request.time;
+
+      allow update, delete: if false;
+    }
+  }
+}

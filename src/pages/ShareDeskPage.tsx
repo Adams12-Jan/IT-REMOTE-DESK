@@ -77,10 +77,14 @@ export function ShareDeskPage({
 
   const handleCopy = async () => {
     const text = `Session ID: ${formatSessionCode(session.sessionCode)}${accessToken ? `\nAccess Code: ${accessToken}` : ''}`;
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    toast.success('Session credentials copied.');
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      toast.success('Session credentials copied.');
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Browser blocked automatic clipboard write.');
+    }
   };
 
   const handlePushClipboard = async () => {
@@ -382,9 +386,13 @@ export function ShareDeskPage({
                   type="button"
                   size="sm"
                   variant="outline"
-                  onClick={() => {
-                    navigator.clipboard.writeText(lastClipboardReceived.text);
-                    toast.success('Copied to your local clipboard.');
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(lastClipboardReceived.text);
+                      toast.success('Copied to your local clipboard.');
+                    } catch {
+                      toast.error('Browser blocked automatic clipboard write.');
+                    }
                   }}
                 >
                   Copy
@@ -397,7 +405,7 @@ export function ShareDeskPage({
         {/* Right 4 Columns: Live Chat & File Transfer */}
         <div className="lg:col-span-4">
           <SessionChatAndFiles
-            sessionId={session.id}
+            session={session}
             messages={session.messages}
             files={session.files}
             permissions={session.permissions}

@@ -1,7 +1,7 @@
 export type UserRole = 'admin' | 'technician' | 'employee';
 
 export interface UserProfile {
-  id: number;
+  id: string;
   uid: string;
   email: string;
   displayName: string;
@@ -12,8 +12,18 @@ export interface UserProfile {
   lastSeenAt?: string;
 }
 
+export interface UserInviteRecord {
+  id: string;
+  email: string;
+  displayName: string;
+  department: string;
+  roleSlug: UserRole;
+  claimed: boolean;
+  createdAt: string;
+}
+
 export interface DeviceRecord {
-  id: number;
+  id: string;
   deviceCode: string;
   hostname: string;
   osPlatform: string;
@@ -28,8 +38,6 @@ export interface IceServerConfig {
 }
 
 export interface SessionPermissions {
-  id: number;
-  sessionId: number;
   profileName: string;
   canViewScreen: boolean;
   canControlInput: boolean;
@@ -38,13 +46,16 @@ export interface SessionPermissions {
   canRecordSession: boolean;
   unattendedAccess: boolean;
   emergencyStoppedAt?: string | null;
+  updatedByUid?: string;
   updatedAt: string;
 }
 
 export interface SessionMessage {
-  id: number;
-  sessionId: number;
-  senderUserId?: number | null;
+  id: string;
+  sessionId: string;
+  hostUid: string;
+  technicianUid: string | null;
+  senderUid?: string | null;
   senderName: string;
   messageType: 'text' | 'system';
   body: string;
@@ -52,10 +63,13 @@ export interface SessionMessage {
 }
 
 export interface FileTransferRecord {
-  id: number;
-  sessionId: number;
-  uploaderUserId: number;
+  id: string;
+  sessionId: string;
+  hostUid: string;
+  technicianUid: string | null;
+  uploaderUid: string;
   originalName: string;
+  storedName: string;
   mimeType: string;
   sizeBytes: number;
   sha256Hash: string;
@@ -65,8 +79,7 @@ export interface FileTransferRecord {
 }
 
 export interface SessionParticipantSummary {
-  id: number;
-  uid?: string;
+  uid: string;
   displayName: string;
   email: string;
   department: string;
@@ -75,10 +88,11 @@ export interface SessionParticipantSummary {
 }
 
 export interface RemoteSession {
-  id: number;
+  id: string;
   sessionCode: string;
-  hostUserId: number;
-  technicianUserId: number | null;
+  hostUid: string;
+  technicianUid: string | null;
+  deviceId: string;
   status: 'waiting' | 'pending_approval' | 'active' | 'rejected' | 'ended' | 'expired';
   issueSummary: string;
   connectionQuality: string;
@@ -96,13 +110,12 @@ export interface RemoteSession {
 }
 
 export interface AuditLogRecord {
-  id: number;
-  actorUserId: number | null;
+  id: string;
+  actorUid: string;
   actorEmail: string | null;
-  sessionId: number | null;
+  sessionId: string | null;
   action: string;
   severity: 'info' | 'warning' | 'critical';
-  ipAddress: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
 }
@@ -115,15 +128,25 @@ export interface DashboardPayload {
     pendingRequests: number;
     onlineTechniciansCount: number;
   };
-  onlineTechnicians: SessionParticipantSummary[];
-  technicians: SessionParticipantSummary[];
-  employees: SessionParticipantSummary[];
-  sessions: Array<Omit<RemoteSession, 'permissions' | 'messages' | 'files'>>;
+  onlineTechnicians: Array<{
+    uid: string;
+    displayName: string;
+    department: string;
+    roleSlug: UserRole;
+    isOnline: boolean;
+    isActive: boolean;
+  }>;
+  technicians: Array<{
+    uid: string;
+    displayName: string;
+    department: string;
+    roleSlug: UserRole;
+  }>;
+  sessions: Array<Omit<RemoteSession, 'messages' | 'files'>>;
   recentActivities: AuditLogRecord[];
 }
 
 export interface AppSettingsRecord {
-  id: number;
   settingKey: string;
   sessionExpiryMinutes: number;
   maxFailedAttempts: number;

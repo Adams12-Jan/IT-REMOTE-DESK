@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp, Search } from 'lucide-react';
+import { toast } from 'sonner';
 import { useAuth } from '../context/AuthContext';
+import {
+  fetchSessionHistory,
+  getSessionByIdApi,
+} from '../lib/remoteDeskApi';
 import {
   formatDateTime,
   formatDuration,
@@ -10,46 +15,51 @@ import { RemoteSession } from '../types/remoteDesk';
 import { Button, Card, Input } from '../components/ui/primitives';
 
 export function HistoryPage() {
-  const { apiFetch } = useAuth();
+  const { apiFetch, profile } = useAuth();
   const [sessions, setSessions] = useState<RemoteSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('all');
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [expandedDetail, setExpandedDetail] = useState<RemoteSession | null>(
     null
   );
 
   const loadHistory = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (status !== 'all') params.set('status', status);
-      if (search.trim()) params.set('search', search.trim());
-      const res = await apiFetch<{ sessions: RemoteSession[] }>(
-        `/api/sessions/history?${params.toString()}`
+      const list = await fetchSessionHistory(apiFetch, { status, search });
+      setSessions(list);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Unable to load session history.'
       );
-      setSessions(res.sessions);
     } finally {
       setLoading(false);
     }
-  }, [apiFetch, search, status]);
+  }, [apiFetch, profile, search, status]);
 
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
 
-  const toggleExpand = async (sessionId: number) => {
+  const toggleExpand = async (sessionId: string) => {
+    if (!profile) return;
     if (expandedId === sessionId) {
       setExpandedId(null);
       setExpandedDetail(null);
       return;
     }
     setExpandedId(sessionId);
-    const res = await apiFetch<{ session: RemoteSession }>(
-      `/api/sessions/${sessionId}`
-    );
-    setExpandedDetail(res.session);
+    try {
+      const hydrated = await getSessionByIdApi(apiFetch, sessionId);
+      setExpandedDetail(hydrated);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Unable to load session details.'
+      );
+    }
   };
 
   return (

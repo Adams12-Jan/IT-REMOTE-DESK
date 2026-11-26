@@ -58,14 +58,14 @@ export function LandingPage({
 
   const isHostingActive =
     Boolean(activeSession) &&
-    activeSession?.hostUserId === profile?.id &&
+    activeSession?.hostUid === profile?.uid &&
     (activeSession?.status === 'waiting' ||
       activeSession?.status === 'pending_approval' ||
       activeSession?.status === 'active');
 
   const isViewingActive =
     Boolean(activeSession) &&
-    activeSession?.technicianUserId === profile?.id &&
+    activeSession?.technicianUid === profile?.uid &&
     (activeSession?.status === 'pending_approval' ||
       activeSession?.status === 'active');
 
@@ -115,11 +115,15 @@ export function LandingPage({
 
   const handleCopyInvite = async () => {
     if (!activeSession) return;
-    const text = `Vetiva IT Remote Desk\nSession ID: ${formatSessionCode(activeSession.sessionCode)}\nAccess Code: ${accessToken || '(see host screen)'}`;
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    toast.success('Session ID and access code copied to clipboard.');
-    setTimeout(() => setCopied(false), 2000);
+    const text = `Vetiva Virtual Remote Desk\nSession ID: ${formatSessionCode(activeSession.sessionCode)}\nAccess Code: ${accessToken || '(see host screen)'}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      toast.success('Session ID and access code copied to clipboard.');
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Browser blocked automatic clipboard write.');
+    }
   };
 
   return (
@@ -128,7 +132,7 @@ export function LandingPage({
       <div className="mb-8 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-neutral-900">
-            Vetiva IT Remote Desk
+            Vetiva Virtual Remote Desk
           </h1>
           <p className="mt-1.5 text-sm text-neutral-600 max-w-2xl">
             Encrypted remote support and screen sharing for Vetiva Capital Management Limited. Every session requires explicit employee approval.

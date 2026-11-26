@@ -142,6 +142,16 @@ export function RemoteViewerPage({
 
   const handleVideoKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!perms?.canControlInput) return;
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
     e.preventDefault();
     onSendRemoteInput({ eventType: 'keydown', key: e.key });
   };
@@ -465,6 +475,12 @@ export function RemoteViewerPage({
               <input
                 value={clipboardDraft}
                 onChange={(e) => setClipboardDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleClipboardAction();
+                  }
+                }}
                 placeholder={
                   lastClipboardReceived
                     ? `Received from ${lastClipboardReceived.senderName}: "${lastClipboardReceived.text.slice(0, 40)}"`
@@ -487,7 +503,7 @@ export function RemoteViewerPage({
         {drawerTab && (
           <div className="w-80 sm:w-96 border-l border-neutral-800 bg-white text-neutral-900 p-3 flex flex-col">
             <SessionChatAndFiles
-              sessionId={session.id}
+              session={session}
               messages={session.messages}
               files={session.files}
               permissions={session.permissions}

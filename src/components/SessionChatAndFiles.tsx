@@ -11,16 +11,21 @@ import {
 import { toast } from 'sonner';
 import { useAuth } from '../context/AuthContext';
 import { auth } from '../lib/firebase';
+import {
+  sendSessionMessage,
+  uploadSessionFile,
+} from '../lib/remoteDeskApi';
 import { formatBytes } from '../lib/utils';
 import {
   FileTransferRecord,
+  RemoteSession,
   SessionMessage,
   SessionPermissions,
 } from '../types/remoteDesk';
 import { Button, Input } from './ui/primitives';
 
 interface SessionChatAndFilesProps {
-  sessionId: number;
+  session: RemoteSession;
   messages: SessionMessage[];
   files: FileTransferRecord[];
   permissions: SessionPermissions | null;
@@ -31,7 +36,7 @@ interface SessionChatAndFilesProps {
 }
 
 export function SessionChatAndFiles({
-  sessionId,
+  session,
   messages,
   files,
   permissions,
@@ -53,18 +58,12 @@ export function SessionChatAndFiles({
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = draft.trim();
-    if (!trimmed || sending) return;
+    if (!trimmed || sending || !profile) return;
     setSending(true);
     try {
-      const res = await apiFetch<{ message: SessionMessage }>(
-        `/api/sessions/${sessionId}/messages`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ body: trimmed }),
-        }
-      );
+      const msg = await sendSessionMessage(apiFetch, session.id, trimmed);
       setDraft('');
-      onMessageSent?.(res.message);
+      onMessageSent?.(msg);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to send message.');
     } finally {
@@ -74,18 +73,12 @@ export function SessionChatAndFiles({
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !profile) return;
     setUploading(true);
     try {
-      const formData = new FormData();
-      formData.append('sessionId', String(sessionId));
-      formData.append('file', file);
-      const res = await apiFetch<{ file: FileTransferRecord }>('/api/files/upload', {
-        method: 'POST',
-        body: formData,
-      });
-      toast.success(`Transferred ${res.file.originalName}`);
-      onFileUploaded?.(res.file);
+      const recorded = await uploadSessionFile(apiFetch, session.id, file);
+      toast.success(`Transferred ${recorded.originalName}`);
+      onFileUploaded?.(recorded);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'File transfer failed.');
     } finally {
@@ -95,13 +88,20 @@ export function SessionChatAndFiles({
   };
 
   const handleDownload = async (file: FileTransferRecord) => {
+    if (!profile) return;
     try {
-      // Request via authenticated fetch so Bearer token stays out of URLs
+      const downloadUrl = `/api/files/${encodeURIComponent(file.storedName)}/download?name=${encodeURIComponent(file.originalName)}`;
       const currentUser = auth.currentUser;
-      const token = currentUser ? await currentUser.getIdToken() : '';
-      const res = await fetch(`/api/files/${file.id}/download`, {
-        headers: { Authorization: `Bearer ${token}` },
+      let token = currentUser ? await currentUser.getIdToken() : '';
+      let res = await fetch(downloadUrl, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
+      if (res.status === 401 && currentUser) {
+        token = await currentUser.getIdToken(true);
+        res = await fetch(downloadUrl, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || 'Download failed.');
@@ -112,7 +112,7 @@ export function SessionChatAndFiles({
       a.href = url;
       a.download = file.originalName;
       a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Unable to download file.');
     }
@@ -120,7 +120,6 @@ export function SessionChatAndFiles({
 
   return (
     <div className="flex flex-col h-full bg-white border border-neutral-200 rounded-xl overflow-hidden">
-      {/* Segmented Chat / File Transfer Header matching Screenshot 2 */}
       <div className="grid grid-cols-2 border-b border-neutral-200 bg-neutral-100">
         <button
           type="button"
@@ -163,7 +162,7 @@ export function SessionChatAndFiles({
               </p>
             ) : (
               messages.map((m) => {
-                const isMe = m.senderUserId === profile?.id;
+                const isMe = m.senderUid === profile?.uid;
                 const time = new Date(m.createdAt).toLocaleTimeString([], {
                   hour: '2-digit',
                   minute: '2-digit',
@@ -253,7 +252,7 @@ export function SessionChatAndFiles({
                   type="file"
                   onChange={handleUpload}
                   className="hidden"
-                  id={`session-file-upload-${sessionId}`}
+                  id={`session-file-upload-${session.id}`}
                 />
                 <Button
                   type="button"

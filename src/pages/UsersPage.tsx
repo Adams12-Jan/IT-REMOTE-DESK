@@ -1,14 +1,21 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Search, UserPlus } from 'lucide-react';
+import { Clock, Search, Trash2, UserPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../context/AuthContext';
+import {
+  createCorporateInvite,
+  listCorporateDirectory,
+  revokeCorporateInvite,
+  updateCorporateUser,
+} from '../lib/remoteDeskApi';
 import { formatDateTime } from '../lib/utils';
-import { UserProfile, UserRole } from '../types/remoteDesk';
+import { UserInviteRecord, UserProfile, UserRole } from '../types/remoteDesk';
 import { Button, Card, Input, Switch } from '../components/ui/primitives';
 
 export function UsersPage() {
   const { apiFetch, profile } = useAuth();
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
+  const [invitesList, setInvitesList] = useState<UserInviteRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
@@ -21,9 +28,9 @@ export function UsersPage() {
   const loadUsers = useCallback(async () => {
     setLoading(true);
     try {
-      const q = search.trim() ? `?search=${encodeURIComponent(search.trim())}` : '';
-      const res = await apiFetch<{ users: UserProfile[] }>(`/api/users${q}`);
+      const res = await listCorporateDirectory(apiFetch, search);
       setUsersList(res.users);
+      setInvitesList(res.invites);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to load users.');
     } finally {
@@ -35,12 +42,10 @@ export function UsersPage() {
     void loadUsers();
   }, [loadUsers]);
 
-  const handleRoleChange = async (userId: number, roleSlug: UserRole) => {
+  const handleRoleChange = async (target: UserProfile, roleSlug: UserRole) => {
+    if (!profile) return;
     try {
-      await apiFetch(`/api/users/${userId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ roleSlug }),
-      });
+      await updateCorporateUser(apiFetch, target.uid, { roleSlug });
       toast.success('User role updated.');
       await loadUsers();
     } catch (err) {
@@ -48,12 +53,10 @@ export function UsersPage() {
     }
   };
 
-  const handleToggleActive = async (userId: number, isActive: boolean) => {
+  const handleToggleActive = async (target: UserProfile, isActive: boolean) => {
+    if (!profile) return;
     try {
-      await apiFetch(`/api/users/${userId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ isActive }),
-      });
+      await updateCorporateUser(apiFetch, target.uid, { isActive });
       toast.success(isActive ? 'Account activated.' : 'Account deactivated.');
       await loadUsers();
     } catch (err) {
@@ -63,26 +66,37 @@ export function UsersPage() {
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newEmail.trim() || !newName.trim()) return;
+    if (!profile || !newEmail.trim() || !newName.trim()) return;
     setCreating(true);
     try {
-      await apiFetch('/api/users', {
-        method: 'POST',
-        body: JSON.stringify({
-          email: newEmail.trim().toLowerCase(),
-          displayName: newName.trim(),
-          department: newDept.trim() || 'Vetiva Operations',
-          roleSlug: newRole,
-        }),
+      await createCorporateInvite(apiFetch, {
+        email: newEmail.trim().toLowerCase(),
+        displayName: newName.trim(),
+        department: newDept.trim() || 'Vetiva Operations',
+        roleSlug: newRole,
       });
-      toast.success('Corporate user pre-registered.');
+      toast.success(
+        'Corporate user invite created. Assigned role will apply automatically on first Google Sign-In.'
+      );
       setNewEmail('');
       setNewName('');
       await loadUsers();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to add user.');
+      toast.error(err instanceof Error ? err.message : 'Failed to invite user.');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleRevokeInvite = async (inviteId: string) => {
+    try {
+      await revokeCorporateInvite(apiFetch, inviteId);
+      toast.success('Pending invite revoked.');
+      await loadUsers();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Unable to revoke invite.'
+      );
     }
   };
 
@@ -163,6 +177,57 @@ export function UsersPage() {
         </form>
       </Card>
 
+      {/* Pending Invites Card (if any) */}
+      {invitesList.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="px-4 py-3 border-b border-neutral-200 flex items-center justify-between bg-neutral-50">
+            <h2 className="font-display text-xs font-bold text-neutral-800 flex items-center gap-2">
+              <Clock className="h-3.5 w-3.5 text-amber-600" />
+              <span>Pending Corporate Invites ({invitesList.length})</span>
+            </h2>
+            <span className="text-[11px] text-neutral-500">
+              Automatically claimed upon verified Google Sign-In
+            </span>
+          </div>
+          <div className="divide-y divide-neutral-200">
+            {invitesList.map((inv) => (
+              <div
+                key={inv.id}
+                className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs"
+              >
+                <div>
+                  <div className="font-semibold text-neutral-900">
+                    {inv.displayName}
+                  </div>
+                  <div className="text-[11px] text-neutral-500">
+                    {inv.email} · {inv.department}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="px-2 py-0.5 rounded bg-neutral-100 text-neutral-700 font-medium capitalize">
+                    {inv.roleSlug}
+                  </span>
+                  <span className="font-mono text-[11px] text-neutral-400">
+                    {formatDateTime(inv.createdAt)}
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleRevokeInvite(inv.id)}
+                    className="text-[#D32027] hover:text-[#B81920]"
+                    title="Revoke invite"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    <span>Revoke</span>
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* Search & Directory Table */}
       <Card className="overflow-hidden">
         <div className="p-4 border-b border-neutral-200 flex items-center justify-between gap-4">
@@ -199,9 +264,15 @@ export function UsersPage() {
                     Loading directory...
                   </td>
                 </tr>
+              ) : usersList.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="py-8 text-center text-neutral-500">
+                    No active user accounts matched your search.
+                  </td>
+                </tr>
               ) : (
                 usersList.map((u) => (
-                  <tr key={u.id} className="hover:bg-neutral-50">
+                  <tr key={u.uid} className="hover:bg-neutral-50">
                     <td className="py-3 px-4">
                       <div className="font-semibold text-neutral-900">
                         {u.displayName}
@@ -212,9 +283,9 @@ export function UsersPage() {
                     <td className="py-3 px-4">
                       <select
                         value={u.roleSlug}
-                        disabled={u.id === profile?.id}
+                        disabled={u.uid === profile?.uid}
                         onChange={(e) =>
-                          handleRoleChange(u.id, e.target.value as UserRole)
+                          handleRoleChange(u, e.target.value as UserRole)
                         }
                         className="h-8 rounded-md border border-neutral-300 bg-white px-2 text-xs text-neutral-900 disabled:opacity-60"
                       >
@@ -242,8 +313,8 @@ export function UsersPage() {
                         <Switch
                           ariaLabel={`Toggle active state for ${u.displayName}`}
                           checked={u.isActive}
-                          disabled={u.id === profile?.id}
-                          onCheckedChange={(val) => handleToggleActive(u.id, val)}
+                          disabled={u.uid === profile?.uid}
+                          onCheckedChange={(val) => handleToggleActive(u, val)}
                         />
                       </div>
                     </td>

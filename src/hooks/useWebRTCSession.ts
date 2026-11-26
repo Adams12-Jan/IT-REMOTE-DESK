@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Socket } from 'socket.io-client';
+import { toast } from 'sonner';
 import { IceServerConfig, SessionPermissions } from '../types/remoteDesk';
 
 export interface RemoteInputEvent {
@@ -12,7 +13,7 @@ export interface RemoteInputEvent {
 }
 
 interface UseWebRTCOptions {
-  sessionId: number | null;
+  sessionId: string | null;
   role: 'host' | 'technician';
   socket: Socket | null;
   iceServers: IceServerConfig[];
@@ -39,6 +40,34 @@ export function useWebRTCSession({
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const isOfferingRef = useRef(false);
+
+  const iceServersRef = useRef(iceServers);
+  const localStreamRef = useRef(localStream);
+  const latencyMsRef = useRef(0);
+  const isActiveSessionRef = useRef(isActiveSession);
+  const onRemoteClipboardRef = useRef(onRemoteClipboard);
+  const onRemoteInputRef = useRef(onRemoteInputReceived);
+
+  useEffect(() => {
+    iceServersRef.current = iceServers;
+  }, [iceServers]);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
+
+  useEffect(() => {
+    isActiveSessionRef.current = isActiveSession;
+  }, [isActiveSession]);
+
+  useEffect(() => {
+    onRemoteClipboardRef.current = onRemoteClipboard;
+  }, [onRemoteClipboard]);
+
+  useEffect(() => {
+    onRemoteInputRef.current = onRemoteInputReceived;
+  }, [onRemoteInputReceived]);
 
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [peerState, setPeerState] = useState<RTCPeerConnectionState>('new');
@@ -47,10 +76,19 @@ export function useWebRTCSession({
   const [isRecording, setIsRecording] = useState(false);
   const [dataChannelOpen, setDataChannelOpen] = useState(false);
 
+  useEffect(() => {
+    latencyMsRef.current = latencyMs;
+  }, [latencyMs]);
+
   const cleanupPeer = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-      recorderRef.current.stop();
+      try {
+        recorderRef.current.stop();
+      } catch {
+        // Ignore stop errors during teardown
+      }
     }
+    recorderRef.current = null;
     if (dataChannelRef.current) {
       dataChannelRef.current.close();
       dataChannelRef.current = null;
@@ -60,38 +98,46 @@ export function useWebRTCSession({
       pcRef.current = null;
     }
     pendingIceRef.current = [];
+    isOfferingRef.current = false;
     setRemoteStream(null);
     setDataChannelOpen(false);
     setPeerState('closed');
   }, []);
 
-  const wireDataChannel = useCallback(
-    (channel: RTCDataChannel) => {
-      dataChannelRef.current = channel;
-      channel.onopen = () => setDataChannelOpen(true);
-      channel.onclose = () => setDataChannelOpen(false);
-      channel.onmessage = (evt) => {
-        try {
-          const parsed = JSON.parse(evt.data);
-          if (parsed.type === 'clipboard' && typeof parsed.text === 'string') {
-            onRemoteClipboard?.(parsed.text, parsed.senderName || 'Remote Peer');
-          } else if (parsed.type === 'input' && parsed.payload) {
-            onRemoteInputReceived?.(parsed.payload);
-          }
-        } catch {
-          // Ignore malformed control packet
+  useEffect(() => {
+    return () => {
+      cleanupPeer();
+    };
+  }, [cleanupPeer]);
+
+  const wireDataChannel = useCallback((channel: RTCDataChannel) => {
+    dataChannelRef.current = channel;
+    channel.onopen = () => setDataChannelOpen(true);
+    channel.onclose = () => setDataChannelOpen(false);
+    channel.onmessage = (evt) => {
+      try {
+        const parsed = JSON.parse(evt.data);
+        if (parsed.type === 'clipboard' && typeof parsed.text === 'string') {
+          onRemoteClipboardRef.current?.(
+            parsed.text,
+            parsed.senderName || 'Remote Peer'
+          );
+        } else if (parsed.type === 'input' && parsed.payload) {
+          onRemoteInputRef.current?.(parsed.payload);
         }
-      };
-    },
-    [onRemoteClipboard, onRemoteInputReceived]
-  );
+      } catch {
+        // Ignore malformed control packet
+      }
+    };
+  }, []);
 
   const createPeerConnection = useCallback(() => {
     if (pcRef.current) {
       pcRef.current.close();
     }
-    const pc = new RTCPeerConnection({ iceServers });
+    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
     pcRef.current = pc;
+    setPeerState(pc.connectionState);
 
     pc.onicecandidate = (event) => {
       if (event.candidate && socket && sessionId) {
@@ -105,7 +151,10 @@ export function useWebRTCSession({
     pc.onconnectionstatechange = () => {
       setPeerState(pc.connectionState);
       if (pc.connectionState === 'connected' && socket && sessionId) {
-        socket.emit('session:connected', { sessionId, latencyMs });
+        socket.emit('session:connected', {
+          sessionId,
+          latencyMs: latencyMsRef.current,
+        });
       }
     };
 
@@ -123,29 +172,44 @@ export function useWebRTCSession({
       wireDataChannel(event.channel);
     };
 
-    if (role === 'host' && localStream) {
-      for (const track of localStream.getTracks()) {
-        pc.addTrack(track, localStream);
+    const currentStream = localStreamRef.current;
+    if (role === 'host' && currentStream) {
+      for (const track of currentStream.getTracks()) {
+        pc.addTrack(track, currentStream);
       }
       const channel = pc.createDataChannel('vetiva-control', { ordered: true });
       wireDataChannel(channel);
     }
 
     return pc;
-  }, [iceServers, latencyMs, localStream, role, sessionId, socket, wireDataChannel]);
+  }, [role, sessionId, socket, wireDataChannel]);
 
   const initiateOffer = useCallback(async () => {
-    if (!socket || !sessionId || role !== 'host' || !localStream) return;
-    const pc = createPeerConnection();
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socket.emit('session:offer', {
-      sessionId,
-      sdp: pc.localDescription,
-    });
-  }, [createPeerConnection, localStream, role, sessionId, socket]);
+    if (
+      !socket ||
+      !sessionId ||
+      role !== 'host' ||
+      !localStreamRef.current ||
+      isOfferingRef.current
+    ) {
+      return;
+    }
+    isOfferingRef.current = true;
+    try {
+      const pc = createPeerConnection();
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('session:offer', {
+        sessionId,
+        sdp: pc.localDescription,
+      });
+    } catch {
+      // Offer failed or superseded by teardown
+    } finally {
+      isOfferingRef.current = false;
+    }
+  }, [createPeerConnection, role, sessionId, socket]);
 
-  // Replace video track seamlessly when host switches screen/window
   const replaceVideoTrack = useCallback(async (newStream: MediaStream) => {
     const pc = pcRef.current;
     if (!pc) return;
@@ -159,47 +223,54 @@ export function useWebRTCSession({
     }
   }, []);
 
-  // Join Socket room & attach WebRTC signaling listeners
   useEffect(() => {
     if (!socket || !sessionId) return;
 
     socket.emit('session:join', { sessionId });
 
     const handleOffer = async (payload: {
-      sessionId: number;
+      sessionId: string;
       sdp: RTCSessionDescriptionInit;
     }) => {
       if (payload.sessionId !== sessionId || role !== 'technician') return;
-      const pc = createPeerConnection();
-      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-      for (const candidate of pendingIceRef.current) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+      try {
+        const pc = createPeerConnection();
+        await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+        for (const candidate of pendingIceRef.current) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+        }
+        pendingIceRef.current = [];
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('session:answer', {
+          sessionId,
+          sdp: pc.localDescription,
+        });
+      } catch {
+        // Ignore stale offer errors during rapid renegotiation
       }
-      pendingIceRef.current = [];
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit('session:answer', {
-        sessionId,
-        sdp: pc.localDescription,
-      });
     };
 
     const handleAnswer = async (payload: {
-      sessionId: number;
+      sessionId: string;
       sdp: RTCSessionDescriptionInit;
     }) => {
       if (payload.sessionId !== sessionId || role !== 'host') return;
       const pc = pcRef.current;
-      if (!pc) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-      for (const candidate of pendingIceRef.current) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+      if (!pc || pc.signalingState !== 'have-local-offer') return;
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+        for (const candidate of pendingIceRef.current) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+        }
+        pendingIceRef.current = [];
+      } catch {
+        // Ignore stale answer errors
       }
-      pendingIceRef.current = [];
     };
 
     const handleIce = async (payload: {
-      sessionId: number;
+      sessionId: string;
       candidate: RTCIceCandidateInit;
     }) => {
       if (payload.sessionId !== sessionId || !payload.candidate) return;
@@ -211,8 +282,12 @@ export function useWebRTCSession({
       await pc.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(() => {});
     };
 
-    const handleParticipantJoined = (payload: { sessionId: number }) => {
-      if (payload.sessionId === sessionId && role === 'host' && isActiveSession) {
+    const handleParticipantJoined = (payload: { sessionId: string }) => {
+      if (
+        payload.sessionId === sessionId &&
+        role === 'host' &&
+        isActiveSessionRef.current
+      ) {
         void initiateOffer();
       }
     };
@@ -229,16 +304,22 @@ export function useWebRTCSession({
       socket.off('session:participant-joined', handleParticipantJoined);
       socket.emit('session:leave', { sessionId });
     };
-  }, [createPeerConnection, initiateOffer, isActiveSession, role, sessionId, socket]);
+  }, [createPeerConnection, initiateOffer, role, sessionId, socket]);
 
-  // Host triggers initial WebRTC offer as soon as session becomes active with a live stream
+  const hasLocalStream = Boolean(localStream);
   useEffect(() => {
-    if (role === 'host' && isActiveSession && localStream && sessionId && socket) {
+    if (
+      role === 'host' &&
+      isActiveSession &&
+      hasLocalStream &&
+      sessionId &&
+      socket &&
+      (!pcRef.current || pcRef.current.connectionState === 'closed')
+    ) {
       void initiateOffer();
     }
-  }, [initiateOffer, isActiveSession, localStream, role, sessionId, socket]);
+  }, [hasLocalStream, initiateOffer, isActiveSession, role, sessionId, socket]);
 
-  // Real-time latency measurement via WebRTC getStats + Socket ping fallback
   useEffect(() => {
     if (!sessionId || !socket || !isActiveSession) return;
     const timer = setInterval(async () => {
@@ -280,7 +361,7 @@ export function useWebRTCSession({
           socket.emit('session:connected', { sessionId, latencyMs: rtt });
         });
       }
-    }, 3000);
+    }, 5000);
 
     return () => clearInterval(timer);
   }, [isActiveSession, sessionId, socket]);
@@ -320,42 +401,68 @@ export function useWebRTCSession({
     if (!permissions?.canRecordSession) return;
 
     if (isRecording && recorderRef.current) {
-      recorderRef.current.stop();
+      if (recorderRef.current.state !== 'inactive') {
+        recorderRef.current.stop();
+      }
       setIsRecording(false);
       return;
     }
 
-    if (!streamToRecord) return;
-    recordedChunksRef.current = [];
-    const recorder = new MediaRecorder(streamToRecord, {
-      mimeType: MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    if (typeof MediaRecorder === 'undefined') {
+      toast.error('Session recording is not supported in this browser.');
+      return;
+    }
+
+    if (!streamToRecord || streamToRecord.getTracks().length === 0) {
+      toast.error('Waiting for active video stream before recording can start.');
+      return;
+    }
+
+    try {
+      recordedChunksRef.current = [];
+      const preferredMime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
         ? 'video/webm;codecs=vp9'
-        : 'video/webm',
-    });
+        : MediaRecorder.isTypeSupported('video/webm')
+          ? 'video/webm'
+          : undefined;
+      const recorder = preferredMime
+        ? new MediaRecorder(streamToRecord, { mimeType: preferredMime })
+        : new MediaRecorder(streamToRecord);
 
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recordedChunksRef.current.push(e.data);
-    };
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
 
-    recorder.onstop = () => {
-      const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `vetiva-session-${sessionId}-${Date.now()}.webm`;
-      a.click();
-      URL.revokeObjectURL(url);
+      recorder.onstop = () => {
+        const blob = new Blob(recordedChunksRef.current, {
+          type: preferredMime || 'video/webm',
+        });
+        if (blob.size > 0) {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `vetiva-session-${sessionId}-${Date.now()}.webm`;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+        recorderRef.current = null;
+        setIsRecording(false);
+      };
+
+      recorder.start(1000);
+      recorderRef.current = recorder;
+      setIsRecording(true);
+    } catch {
+      toast.error('Unable to start session recording in this browser.');
       setIsRecording(false);
-    };
-
-    recorder.start(1000);
-    recorderRef.current = recorder;
-    setIsRecording(true);
+    }
   }, [isRecording, localStream, permissions?.canRecordSession, remoteStream, role, sessionId]);
 
   useEffect(() => {
     if (!permissions?.canRecordSession && isRecording && recorderRef.current) {
-      recorderRef.current.stop();
+      if (recorderRef.current.state !== 'inactive') {
+        recorderRef.current.stop();
+      }
       setIsRecording(false);
     }
   }, [isRecording, permissions?.canRecordSession]);

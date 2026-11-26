@@ -2,12 +2,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Laptop, Save, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../context/AuthContext';
+import {
+  fetchSettingsAndLogs,
+  updateSettingsPolicy,
+} from '../lib/remoteDeskApi';
 import { formatDateTime } from '../lib/utils';
 import { AppSettingsRecord, AuditLogRecord } from '../types/remoteDesk';
 import { Button, Card, Input, Switch } from '../components/ui/primitives';
 
 export function SettingsPage() {
-  const { apiFetch } = useAuth();
+  const { apiFetch, profile } = useAuth();
   const [settings, setSettings] = useState<AppSettingsRecord | null>(null);
   const [logs, setLogs] = useState<AuditLogRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -16,15 +20,13 @@ export function SettingsPage() {
   const [extensionsInput, setExtensionsInput] = useState('');
 
   const loadData = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     try {
-      const [sRes, lRes] = await Promise.all([
-        apiFetch<{ settings: AppSettingsRecord }>('/api/settings'),
-        apiFetch<{ logs: AuditLogRecord[] }>('/api/audit-logs'),
-      ]);
-      setSettings(sRes.settings);
-      setExtensionsInput(sRes.settings.allowedFileExtensions.join(', '));
-      setLogs(lRes.logs);
+      const { settings: sRes, logs: lRes } = await fetchSettingsAndLogs(apiFetch);
+      setSettings(sRes);
+      setExtensionsInput(sRes.allowedFileExtensions.join(', '));
+      setLogs(lRes);
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : 'Unable to load security settings.'
@@ -32,7 +34,7 @@ export function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [apiFetch]);
+  }, [apiFetch, profile]);
 
   useEffect(() => {
     void loadData();
@@ -40,7 +42,7 @@ export function SettingsPage() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!settings) return;
+    if (!settings || !profile) return;
     setSaving(true);
     try {
       const parsedExts = extensionsInput
@@ -48,20 +50,17 @@ export function SettingsPage() {
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.startsWith('.') && s.length >= 2);
 
-      const res = await apiFetch<{ settings: AppSettingsRecord }>('/api/settings', {
-        method: 'PATCH',
-        body: JSON.stringify({
-          sessionExpiryMinutes: Number(settings.sessionExpiryMinutes),
-          maxFailedAttempts: Number(settings.maxFailedAttempts),
-          maxFileSizeMb: Number(settings.maxFileSizeMb),
-          requireExplicitControlConsent: settings.requireExplicitControlConsent,
-          allowSessionRecording: settings.allowSessionRecording,
-          enforceVetivaDomainOnly: settings.enforceVetivaDomainOnly,
-          allowedFileExtensions: parsedExts,
-        }),
+      const updated = await updateSettingsPolicy(apiFetch, {
+        sessionExpiryMinutes: Number(settings.sessionExpiryMinutes),
+        maxFailedAttempts: Number(settings.maxFailedAttempts),
+        maxFileSizeMb: Number(settings.maxFileSizeMb),
+        requireExplicitControlConsent: settings.requireExplicitControlConsent,
+        allowSessionRecording: settings.allowSessionRecording,
+        enforceVetivaDomainOnly: settings.enforceVetivaDomainOnly,
+        allowedFileExtensions: parsedExts,
       });
-      setSettings(res.settings);
-      toast.success('Security policies saved to PostgreSQL.');
+      setSettings(updated);
+      toast.success('Security policies saved.');
       await loadData();
     } catch (err) {
       toast.error(

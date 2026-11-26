@@ -15,6 +15,10 @@ import {
 import { io, Socket } from 'socket.io-client';
 import { auth, googleAuthProvider } from '../lib/firebase';
 import {
+  notifyLogout,
+  syncAuthenticatedProfile,
+} from '../lib/remoteDeskApi';
+import {
   DeviceRecord,
   IceServerConfig,
   UserProfile,
@@ -107,60 +111,68 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [getFreshToken]
   );
 
-  const connectSocket = useCallback(async (token: string) => {
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
-
-    setConnectionState('connecting');
-    const nextSocket = io({
-      auth: { token },
-      transports: ['websocket', 'polling'],
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1500,
-    });
-
-    nextSocket.on('connect', () => {
-      setConnectionState('ready');
-    });
-
-    nextSocket.on('disconnect', () => {
-      setConnectionState('disconnected');
-    });
-
-    nextSocket.on('connect_error', async () => {
-      setConnectionState('disconnected');
-      const refreshed = await getFreshToken(true).catch(() => null);
-      if (refreshed) {
-        nextSocket.auth = { token: refreshed };
+  const connectSocket = useCallback(
+    async (token: string) => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
       }
-    });
 
-    socketRef.current = nextSocket;
-    setSocket(nextSocket);
-  }, [getFreshToken]);
+      setConnectionState('connecting');
+      const nextSocket = io({
+        auth: { token },
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 1500,
+      });
 
-  const syncServerSession = useCallback(
+      nextSocket.on('connect', () => {
+        setConnectionState('ready');
+      });
+
+      nextSocket.on('disconnect', () => {
+        setConnectionState('disconnected');
+      });
+
+      nextSocket.on('connect_error', async () => {
+        setConnectionState('disconnected');
+        const refreshed = await getFreshToken(true).catch(() => null);
+        if (refreshed) {
+          nextSocket.auth = { token: refreshed };
+        }
+      });
+
+      socketRef.current = nextSocket;
+      setSocket(nextSocket);
+    },
+    [getFreshToken]
+  );
+
+  const syncUserSession = useCallback(
     async (user: FirebaseUser) => {
       try {
         setAuthError(null);
         const token = await user.getIdToken();
         tokenRef.current = token;
-        const data = await apiFetch<{
-          user: UserProfile;
-          device: DeviceRecord;
-          iceServers: IceServerConfig[];
-        }>('/api/auth/login', { method: 'POST' });
 
-        setProfile(data.user);
-        setDevice(data.device);
-        if (data.iceServers?.length) {
-          setIceServers(data.iceServers);
+        const [{ user: userProfile, device: deviceRecord }, iceRes] =
+          await Promise.all([
+            syncAuthenticatedProfile(apiFetch),
+            apiFetch<{ iceServers: IceServerConfig[] }>('/api/ice-servers').catch(
+              () => ({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+              })
+            ),
+          ]);
+
+        setProfile(userProfile);
+        setDevice(deviceRecord);
+        if (iceRes.iceServers?.length) {
+          setIceServers(iceRes.iceServers);
         }
         await connectSocket(token);
-        return data.user;
+        return userProfile;
       } catch (err) {
         const msg =
           err instanceof Error ? err.message : 'Unable to authenticate session.';
@@ -174,23 +186,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshProfile = useCallback(async () => {
     if (!auth.currentUser) return;
-    const data = await apiFetch<{
-      user: UserProfile;
-      device: DeviceRecord;
-      iceServers: IceServerConfig[];
-    }>('/api/auth/me');
-    setProfile(data.user);
-    setDevice(data.device);
-    if (data.iceServers?.length) {
-      setIceServers(data.iceServers);
-    }
+    const { user, device: dev } = await syncAuthenticatedProfile(apiFetch);
+    setProfile(user);
+    setDevice(dev);
   }, [apiFetch]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
       if (user) {
-        await syncServerSession(user);
+        await syncUserSession(user);
       } else {
         tokenRef.current = null;
         setProfile(null);
@@ -212,19 +217,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         socketRef.current = null;
       }
     };
-  }, [syncServerSession]);
+  }, [syncUserSession]);
 
   const signInWithGoogle = useCallback(async (): Promise<UserProfile | null> => {
     setAuthError(null);
-    const cred = await signInWithPopup(auth, googleAuthProvider);
-    return syncServerSession(cred.user);
-  }, [syncServerSession]);
+    try {
+      const cred = await signInWithPopup(auth, googleAuthProvider);
+      return syncUserSession(cred.user);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Unable to sign in with Google.';
+      if (msg.includes('auth/unauthorized-domain')) {
+        const host =
+          typeof window !== 'undefined' ? window.location.hostname : '';
+        const friendly = `Domain "${host}" is not authorized in Firebase Authentication. Add it under Authentication -> Settings -> Authorized domains in your Firebase Console.`;
+        setAuthError(friendly);
+        throw new Error(friendly);
+      }
+      throw err;
+    }
+  }, [syncUserSession]);
 
   const signOut = useCallback(async () => {
     try {
-      if (tokenRef.current) {
-        await apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
-      }
+      await notifyLogout(apiFetch);
     } finally {
       tokenRef.current = null;
       if (socketRef.current) {

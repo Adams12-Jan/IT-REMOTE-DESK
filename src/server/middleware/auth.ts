@@ -1,43 +1,33 @@
-import type { Request, Response, NextFunction } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { adminAuth } from '../../lib/firebase-admin.ts';
-import { getOrCreateUser } from '../db/queries.ts';
+import type { UserProfile } from '../../types/remoteDesk.ts';
+import { getUserByUid } from '../db.ts';
 
-export type UserRole = 'admin' | 'technician' | 'employee';
-
-export interface AuthenticatedUser {
-  id: number;
+export interface VerifiedTokenUser {
   uid: string;
   email: string;
   displayName: string;
-  department: string;
-  roleSlug: UserRole;
-  isActive: boolean;
 }
 
 export interface AuthRequest extends Request {
-  authUser?: AuthenticatedUser;
+  authUser?: VerifiedTokenUser;
+  userProfile?: UserProfile;
 }
 
-export async function verifyBearerToken(token: string): Promise<AuthenticatedUser> {
+export async function verifyBearerToken(
+  token: string
+): Promise<VerifiedTokenUser> {
   const decoded = await adminAuth.verifyIdToken(token);
   const email = decoded.email;
-  if (!email) {
+  if (!email || decoded.email_verified !== true) {
     throw new Error('Token missing verified email address.');
   }
   const displayName =
     decoded.name || email.split('@')[0].replace(/[._]/g, ' ');
-  const user = await getOrCreateUser(decoded.uid, email, displayName);
-  if (!user.isActive) {
-    throw new Error('Account has been deactivated by an administrator.');
-  }
   return {
-    id: user.id,
-    uid: user.uid,
-    email: user.email,
-    displayName: user.displayName,
-    department: user.department,
-    roleSlug: user.roleSlug as UserRole,
-    isActive: user.isActive,
+    uid: decoded.uid,
+    email: email.trim().toLowerCase(),
+    displayName,
   };
 }
 
@@ -59,25 +49,38 @@ export const requireAuth = async (
   try {
     req.authUser = await verifyBearerToken(token);
     next();
-  } catch (error) {
-    const message =
-      error instanceof Error && error.message.includes('deactivated')
-        ? error.message
-        : 'Invalid or expired authentication token.';
-    return res.status(401).json({ error: message });
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired authentication token.' });
   }
 };
 
-export const requireRole = (...allowedRoles: UserRole[]) => {
-  return (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (!req.authUser) {
-      return res.status(401).json({ error: 'Authentication required.' });
-    }
-    if (!allowedRoles.includes(req.authUser.roleSlug)) {
-      return res.status(403).json({
-        error: 'You do not have permission to perform this action.',
-      });
-    }
-    next();
-  };
+export const requireProfile = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  if (!req.authUser) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+  const profile = getUserByUid(req.authUser.uid);
+  if (!profile) {
+    return res.status(403).json({ error: 'User profile is not synced yet.' });
+  }
+  if (!profile.isActive) {
+    return res.status(403).json({ error: 'Account has been deactivated by an administrator.' });
+  }
+  req.userProfile = profile;
+  next();
 };
+
+export const requireAdmin = (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  if (!req.userProfile || req.userProfile.roleSlug !== 'admin') {
+    return res.status(403).json({ error: 'Administrator privileges required.' });
+  }
+  next();
+};
+

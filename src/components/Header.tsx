@@ -23,6 +23,7 @@ interface HeaderProps {
   onSignIn: () => void;
   onSignOut: () => void;
   hasActiveSession: boolean;
+  isHostSession?: boolean;
 }
 
 export function Header({
@@ -33,6 +34,7 @@ export function Header({
   onSignIn,
   onSignOut,
   hasActiveSession,
+  isHostSession = false,
 }: HeaderProps) {
   const statusDisplay = (() => {
     if (connectionState === 'ready') {
@@ -94,7 +96,7 @@ export function Header({
             />
             <div className="flex items-baseline gap-2 whitespace-nowrap">
               <span className="font-display text-lg font-bold tracking-tight text-neutral-900">
-                IT Remote Desk
+                Virtual Remote Desk
               </span>
               <span className="hidden sm:inline text-xs font-medium text-neutral-500">
                 Vetiva
@@ -150,7 +152,7 @@ export function Header({
             <Button
               size="sm"
               variant="outline"
-              onClick={() => onNavigate('viewer')}
+              onClick={() => onNavigate(isHostSession ? 'share' : 'viewer')}
               className="hidden sm:inline-flex"
             >
               Return to Session

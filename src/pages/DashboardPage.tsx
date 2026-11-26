@@ -12,6 +12,10 @@ import {
 import { toast } from 'sonner';
 import { useAuth } from '../context/AuthContext';
 import {
+  disconnectSession,
+  fetchDashboardData,
+} from '../lib/remoteDeskApi';
+import {
   formatDateTime,
   formatDuration,
   formatSessionCode,
@@ -20,7 +24,7 @@ import { DashboardPayload } from '../types/remoteDesk';
 import { Button, Card, Input } from '../components/ui/primitives';
 
 interface DashboardPageProps {
-  onOpenSession: (sessionId: number, mode: 'host' | 'viewer') => Promise<void>;
+  onOpenSession: (sessionId: string, mode: 'host' | 'viewer') => Promise<void>;
 }
 
 export function DashboardPage({ onOpenSession }: DashboardPageProps) {
@@ -36,10 +40,11 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
   const [dateTo, setDateTo] = useState<string>('');
 
   const loadDashboard = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch<DashboardPayload>('/api/dashboard');
+      const res = await fetchDashboardData(apiFetch);
       setData(res);
     } catch (err) {
       setError(
@@ -48,7 +53,7 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
     } finally {
       setLoading(false);
     }
-  }, [apiFetch]);
+  }, [apiFetch, profile]);
 
   useEffect(() => {
     void loadDashboard();
@@ -77,7 +82,7 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
       if (statusFilter !== 'all' && s.status !== statusFilter) return false;
       if (
         techFilter !== 'all' &&
-        String(s.technicianUserId ?? '') !== techFilter
+        (s.technicianUid ?? '') !== techFilter
       ) {
         return false;
       }
@@ -102,12 +107,14 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
     });
   }, [data, dateFrom, dateTo, employeeQuery, statusFilter, techFilter]);
 
-  const handleForceDisconnect = async (sessionId: number) => {
+  const handleForceDisconnect = async (sessionId: string) => {
+    if (!profile) return;
     try {
-      await apiFetch(`/api/sessions/${sessionId}/disconnect`, {
-        method: 'POST',
-        body: JSON.stringify({ reason: 'Terminated from IT Support Dashboard' }),
-      });
+      await disconnectSession(
+        apiFetch,
+        sessionId,
+        'Terminated from IT Support Dashboard'
+      );
       toast.success('Session terminated.');
       await loadDashboard();
     } catch (err) {
@@ -123,7 +130,10 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
         <div className="h-8 w-64 bg-neutral-200 rounded animate-pulse" />
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
           {[1, 2, 3, 4, 5].map((i) => (
-            <div key={i} className="h-24 bg-white rounded-xl border border-neutral-200 animate-pulse" />
+            <div
+              key={i}
+              className="h-24 bg-white rounded-xl border border-neutral-200 animate-pulse"
+            />
           ))}
         </div>
         <div className="h-72 bg-white rounded-xl border border-neutral-200 animate-pulse" />
@@ -228,7 +238,7 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
           >
             <option value="all">All Technicians</option>
             {data.technicians.map((t) => (
-              <option key={t.id} value={String(t.id)}>
+              <option key={t.uid} value={t.uid}>
                 {t.displayName}
               </option>
             ))}
@@ -372,8 +382,8 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
                         <td className="py-3 px-4 text-right whitespace-nowrap">
                           <div className="inline-flex items-center gap-2">
                             {isOpen &&
-                              (s.hostUserId === profile?.id ||
-                                s.technicianUserId === profile?.id) && (
+                              (s.hostUid === profile?.uid ||
+                                s.technicianUid === profile?.uid) && (
                                 <Button
                                   type="button"
                                   size="sm"
@@ -381,7 +391,7 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
                                   onClick={() =>
                                     onOpenSession(
                                       s.id,
-                                      s.hostUserId === profile?.id
+                                      s.hostUid === profile?.uid
                                         ? 'host'
                                         : 'viewer'
                                     )
@@ -434,7 +444,7 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
               ) : (
                 data.onlineTechnicians.map((tech) => (
                   <div
-                    key={tech.id}
+                    key={tech.uid}
                     className="flex items-center justify-between text-xs py-1.5 border-b border-neutral-100 last:border-0"
                   >
                     <div className="min-w-0">
@@ -442,7 +452,7 @@ export function DashboardPage({ onOpenSession }: DashboardPageProps) {
                         {tech.displayName}
                       </div>
                       <div className="text-[11px] text-neutral-500 truncate">
-                        {tech.email}
+                        {tech.department}
                       </div>
                     </div>
                     <span className="text-[11px] font-medium text-[#15803D] shrink-0">

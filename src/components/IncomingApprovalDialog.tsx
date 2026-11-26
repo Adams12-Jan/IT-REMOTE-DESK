@@ -260,7 +260,7 @@ export function IncomingApprovalDialog({
           {/* Right Pane: Open Chat Log & File Transfer matching Screenshot 2 */}
           <div className="md:col-span-7 p-4 bg-neutral-50/50">
             <SessionChatAndFiles
-              sessionId={session.id}
+              session={session}
               messages={session.messages}
               files={session.files}
               permissions={session.permissions}
